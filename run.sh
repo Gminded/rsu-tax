@@ -46,7 +46,7 @@ source "${PWD}/env/bin/activate"
 echo $(which python3)
 
 
-python3 bin/parse-stock-releases.py $RELEASE_CONFIRMATIONS/*/*.pdf > $OUT_DIR/parsed-releases.csv
+python3 bin/parse-stock-releases.py $RELEASE_CONFIRMATIONS/*.pdf > $OUT_DIR/parsed-releases.csv
 python3 bin/combine.py $EXCHANGE_RATES/*.csv > $OUT_DIR/exchange-rates.csv
 python3 bin/calculate-cost-basis.py $OUT_DIR/parsed-releases.csv $OUT_DIR/exchange-rates.csv > $OUT_DIR/cost-basis.csv
 
