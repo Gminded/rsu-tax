@@ -15,7 +15,7 @@ def main(argv: List[str]) -> int:
         sys.stderr.write("Usage: parse_stock_release_pdfs.py <file1.pdf> [<file2.pdf> ...]\n")
         return 2
 
-    fieldnames = ["Release Date", "Granted", "Withheld", "Issued", "Price per share ($)"]
+    fieldnames = ["Release Date", "Granted", "Sold", "Issued", "Price per share ($)"]
     writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
     writer.writeheader()
 

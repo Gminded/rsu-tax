@@ -83,6 +83,7 @@ def parse_pdf(pdf_path: Path) -> Dict[str, Optional[str]]:
     lines_sd = [ln for ln in block_dist.splitlines() if ln.strip()]
     grant = _clean_num(lines_sd[0]) if len(lines_sd) >= 1 else None
     withheld = _clean_num(lines_sd[1]) if len(lines_sd) >= 2 else None
+    withheld = abs(int(round(withheld)))
     issued = _clean_num(lines_sd[2]) if len(lines_sd) >= 3 else None
 
     # NEW: Award Date
@@ -103,10 +104,14 @@ def parse_pdf(pdf_path: Path) -> Dict[str, Optional[str]]:
                 award_number = value[0]
                 break
 
+    # Validate Issued field:
+    if issued != grant - withheld:
+        raise ValueError(f"Issued ({issued}) != Granted ({grant}) - Withheld ({withheld})")
+
     return {
         "Release Date": date_out,
         "Granted": int(round(grant)) if grant is not None else None,
-        "Withheld": abs(int(round(withheld))) if withheld is not None else None,
+        "Sold": withheld if withheld is not None else None,
         "Issued": int(round(issued)) if issued is not None else None,
         "Price per share ($)": round(mv, 2) if mv is not None else None,
         "Award Date": award_date_out,
