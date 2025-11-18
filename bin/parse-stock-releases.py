@@ -15,18 +15,20 @@ def main(argv: List[str]) -> int:
         sys.stderr.write("Usage: parse_stock_release_pdfs.py <file1.pdf> [<file2.pdf> ...]\n")
         return 2
 
-    fieldnames = ["Date", "Granted", "Withheld", "Issued", "Price per share ($)"]
+    fieldnames = ["Release Date", "Granted", "Withheld", "Issued", "Price per share ($)"]
     writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
     writer.writeheader()
 
-    all_rows = []
+    rows = []
 
     for p in argv[1:]:
         path = Path(p)
-        all_rows.append(parse_pdf(path))
-    all_rows.sort(key=(lambda x: date.fromisoformat(x["Date"])))
+        row = parse_pdf(Path(p))
+        # Filter out Award fields (and anything else not listed)
+        rows.append({k: row.get(k) for k in fieldnames})
+    rows.sort(key=(lambda x: date.fromisoformat(x["Release Date"])))
 
-    for row in all_rows:
+    for row in rows:
         writer.writerow(row)
     return 0
 

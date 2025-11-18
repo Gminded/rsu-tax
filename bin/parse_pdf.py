@@ -1,4 +1,5 @@
 import re
+import sys
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, List
@@ -45,31 +46,37 @@ def _clean_num(s: Optional[str]) -> Optional[float]:
         v = float(s)
         return -v if neg else v
     except ValueError:
+        print("Error in _clean_num()", file=sys.stderr)
         return None
+
+def _parse_mmddyyyy(s: str) -> Optional[str]:
+    for fmt in ("%m-%d-%Y", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    return None
 
 def parse_pdf(pdf_path: Path) -> Dict[str, Optional[str]]:
     boxes = _collect_boxes(pdf_path)
 
-    # Release Date block
+    # Release Date block (the cell to the right contains date, shares released, etc.)
     block = _neighbor_block_right(boxes, "Release Date")
     date_out = None
     if block:
         lines = [ln for ln in block.splitlines() if ln.strip()]
-        date_raw = _first_match(r"(\d{2}-\d{2}-\d{4})", lines)
+        date_raw = _first_match(r"(\d{2}[-/]\d{2}[-/]\d{4})", lines)
         if date_raw:
-            try:
-                date_out = datetime.strptime(date_raw, "%m-%d-%Y").strftime("%Y-%m-%d")
-            except Exception:
-                pass
+            date_out = _parse_mmddyyyy(date_raw)
 
-    # Market Value Per Share block (same block can be reused, but safe to look it up)
+    # Market Value Per Share (first line in the same 3–5 line block starting with "$")
     block_mv = _neighbor_block_right(boxes, "Market Value Per Share") or block or ""
     lines_mv = [ln for ln in block_mv.splitlines() if ln.strip()]
     # heuristic: first line starting with $ is the market value per share
     mv_raw = next((ln.strip() for ln in lines_mv if ln.strip().startswith("$")), None)
     mv = _clean_num(mv_raw)
 
-    # Award Shares / Shares Traded/Sold / Shares Issued block
+    # Stock distribution: Award Shares / (Shares Traded|Sold) / Shares Issued
     block_dist = (_neighbor_block_right(boxes, "Award Shares") or
                   _neighbor_block_right(boxes, "Shares Traded") or
                   _neighbor_block_right(boxes, "Shares Sold") or "")
@@ -78,10 +85,30 @@ def parse_pdf(pdf_path: Path) -> Dict[str, Optional[str]]:
     withheld = _clean_num(lines_sd[1]) if len(lines_sd) >= 2 else None
     issued = _clean_num(lines_sd[2]) if len(lines_sd) >= 3 else None
 
+    # NEW: Award Date
+    award_date_block = _neighbor_block_right(boxes, "Award Date") or ""
+    award_date_lines = [ln for ln in award_date_block.splitlines() if ln.strip()]
+    award_date_raw = _first_match(r"(\d{2}[-/]\d{2}[-/]\d{4})", award_date_lines)
+    award_date_out = _parse_mmddyyyy(award_date_raw) if award_date_raw else None
+
+    # NEW: Award Number (typ. a numeric or alphanumeric code)
+    award_num_block = _neighbor_block_right(boxes, "Award Number") or ""
+    award_num_lines = [ln for ln in award_num_block.splitlines() if ln.strip()]
+    award_number = None
+    if award_num_lines:
+        # take the first token on the fourth line; adjust if your PDFs show a different layout
+        for line in award_num_lines:
+            value = re.findall(r"\bR\d+", line)
+            if value:
+                award_number = value[0]
+                break
+
     return {
-        "Date": date_out,
+        "Release Date": date_out,
         "Granted": int(round(grant)) if grant is not None else None,
         "Withheld": abs(int(round(withheld))) if withheld is not None else None,
         "Issued": int(round(issued)) if issued is not None else None,
         "Price per share ($)": round(mv, 2) if mv is not None else None,
+        "Award Date": award_date_out,
+        "Award Number": award_number,
     }
