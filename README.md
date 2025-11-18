@@ -5,6 +5,8 @@ This project helps you parse RSU release PDFs from e*trade, convert them to CSV,
 
 I created it as a personal project for personal use, but I am now sharing it in the hope that it can help others to avoid some of the problems that arise from having to deal with a US-centric stock broker as a British taxpayer. With that said I can definitely **not guarantee** that anything in this project is correct or even useful, nor that you won't be punished by HMRC if you use my tools.
 
+The "same day" and "bed and breakfasting" rules are currently ignored. I will probably implement them soon.
+
 ## Dependencies
 In order to run the tools you will need python 3 (version 3.12 or later is recommended) and pip.
 virtualenv is recommended.
@@ -63,3 +65,6 @@ It provides a single function to be used in other scripts.
   - `Price per share ($)`  
   - `Award Date`, `Award Number`
 - **How it works:** PDF text-box layout parsing via `pdfminer.six` with positional lookups next to labels (e.g., “Release Date”, “Award Shares”, “Award Date”, “Award Number”, etc.).
+
+### References
+The relevant HMRC rules can be found at https://www.gov.uk/government/publications/shares-and-capital-gains-tax-hs284-self-assessment-helpsheet/hs284-shares-and-capital-gains-tax-2024.
