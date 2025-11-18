@@ -14,16 +14,13 @@
 # along with this program; if not, see
 # <https://www.gnu.org/licenses/>.
 
-import re
 import sys
 import csv
 from pathlib import Path
-from datetime import datetime, date
-from typing import Optional, Dict, List, Tuple
+from datetime import date
+from typing import List
 
 from parse_pdf import parse_pdf
-from pdfminer.high_level import extract_pages
-from pdfminer.layout import LTTextContainer, LTTextBox, LTTextLine, LAParams
 
 def main(argv: List[str]) -> int:
     if len(argv) < 2:
@@ -37,7 +34,6 @@ def main(argv: List[str]) -> int:
     rows = []
 
     for p in argv[1:]:
-        path = Path(p)
         row = parse_pdf(Path(p))
         # Filter out Award fields (and anything else not listed)
         rows.append({k: row.get(k) for k in fieldnames})
