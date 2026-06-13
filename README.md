@@ -18,8 +18,29 @@ sudo apt install python3 python3-pip python3-virtualenv
 The pandas and pdfminer.six python modules are also required. They automatically installed in a virtual environment if `setup.sh` is run.
 
 ## Setup and Run
-Execute `setup.sh` to set up the environment. Execute `run.sh` to run the tools in sequence and
-go from a bunch of pdf files from e*trade and a list of sales to a full calculation of the gains and losses. Start with `run.sh -h` to see a description of the parameters.
+
+Execute `setup.sh` to set up the environment.
+
+### Web GUI
+
+The recommended way to use the tools is the web GUI. Launch it with:
+```
+source env/bin/activate
+streamlit run app.py
+```
+Then open `http://localhost:8501` in your browser.
+
+The GUI has three input sections:
+
+- **RSU Releases** — drag-and-drop one or more e*trade release confirmation PDFs. Each file is parsed immediately and the results appear in an editable table so you can correct any parse errors.
+- **Sales** — an editable table for voluntary sell transactions (not tax-withholding). Pre-loaded from `sales/sales.csv` if it exists.
+- **Exchange Rates** — automatically loaded from the bundled HMRC monthly rate files. You can upload additional CSVs here if your releases fall outside the covered period.
+
+Click **Calculate Gains & Losses** to run the full HS284 calculation. The results show a capital gains summary by UK tax year and a complete event timeline, with a **Download CSV** button to export the output.
+
+### Command-line pipeline
+
+Execute `run.sh` to run the tools in sequence and go from a bunch of PDF files from e*trade and a list of sales to a full calculation of the gains and losses. Start with `run.sh -h` to see a description of the parameters.
 
 ### Stock Release Confirmations
 These can be obtained from e*trade as PDF files. In their website go to the "At work" section and select "My Account" -> "Benefit History". Expand "Restricted Stock (RS)" and click on the "View Confirmation of Release" links to download the files. For convenience you can use short names for the files (e.g. single digits or characters), then use `rename-release-confirmations.py` to automatically give them sensible names.
