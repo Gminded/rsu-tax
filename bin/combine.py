@@ -31,10 +31,12 @@ def main(argv):
 def get_usd_row(path):
     with open(path, "rb") as f:
         while True:
-            line = f.readline().decode("ISO-8859-1").strip()
+            raw = f.readline()
+            if not raw:  # EOF — USA/USD row not found in this file
+                return None
+            line = raw.decode("ISO-8859-1").strip()
             if "USA,Dollar,USD" in line:
                 return line.split(",")
-    return None
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv))
