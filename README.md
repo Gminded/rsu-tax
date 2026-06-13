@@ -5,7 +5,7 @@ This project helps you parse RSU release PDFs from e*trade, convert them to CSV,
 
 I created it as a personal project for personal use, but I am now sharing it in the hope that it can help others to avoid some of the problems that arise from having to deal with a US-centric stock broker as a British taxpayer. With that said I can definitely **not guarantee** that anything in this project is correct or even useful, nor that you won't be punished by HMRC if you use my tools.
 
-The "same day" and "bed and breakfasting" rules are currently ignored. I will probably implement them soon.
+The HMRC share-identification rules are implemented in full: same-day acquisitions are matched first, followed by acquisitions in the 30 days after the disposal (bed-and-breakfasting rule), and any remaining quantity is matched against the Section 104 pool. The output includes a "Matching Rule" column showing which rule(s) were applied to each disposal.
 
 ## Dependencies
 In order to run the tools you will need python 3 (version 3.12 or later is recommended) and pip.
@@ -49,8 +49,11 @@ E*trade provides all the information relative to vested RSUs: release date, numb
   - Appends a valid **`GBP/USD`** rate on each event date.
   - Merges **Buy (releases)** and **Sell (sales)** into one timeline and sorts by date.
   - Prepends `Type` column: `Buy` or `Sell`.
-  - Adds `Avg cost per share (GBP)` as a running weighted-average of holdings after each event, as per the Section 104 holding rules.
-  - Prints final **USD** and **GBP** cost basis across **buys only** (weighted by `Issued`).
+  - Implements the full HMRC share-identification order: same-day rule → 30-day rule → Section 104 pool.
+  - Inserts `WithholdingSell` rows for shares sold by the broker to cover income tax on RSU vests (these are CGT disposals with zero gain and appear in the output for HMRC reporting purposes).
+  - Adds a `Matching Rule` column indicating which identification rule(s) applied to each disposal.
+  - Adds `Price per share (GBP)` as an output column for easier verification.
+  - Prints a capital-gains summary by UK tax year to stderr after generating the CSV.
 - **Flexible sales headers:** auto-detects typical columns (date, shares, USD price). If your headers differ, adjust the detection list in the script.
 
 ### 3) `rename-release-confirmations.py`
