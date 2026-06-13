@@ -32,11 +32,22 @@ def main(argv: List[str]) -> int:
     writer.writeheader()
 
     rows = []
+    failed = False
 
     for p in argv[1:]:
-        row = parse_pdf(Path(p))
+        try:
+            row = parse_pdf(Path(p))
+        except Exception as e:
+            sys.stderr.write(f"ERROR: failed to parse '{p}': {e}\n")
+            failed = True
+            continue
         # Filter out Award fields (and anything else not listed)
         rows.append({k: row.get(k) for k in fieldnames})
+
+    if failed:
+        sys.stderr.write("Aborting: one or more PDFs could not be parsed (see errors above).\n")
+        return 1
+
     rows.sort(key=(lambda x: date.fromisoformat(x["Release Date"])))
 
     for row in rows:

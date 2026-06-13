@@ -92,6 +92,20 @@ def parse_pdf(pdf_path: Path) -> Dict[str, Optional[str]]:
     mv_raw = next((ln.strip() for ln in lines_mv if ln.strip().startswith("$")), None)
     mv = _clean_num(mv_raw)
 
+    # Release Date — required
+    if date_out is None:
+        raise ValueError(
+            "Could not extract 'Release Date' from PDF. "
+            "Expected a date next to a 'Release Date' label in MM/DD/YYYY or MM-DD-YYYY format."
+        )
+
+    # Market value per share — required
+    if mv is None:
+        raise ValueError(
+            "Could not extract 'Market Value Per Share' from PDF. "
+            "Expected a '$...' value next to a 'Market Value Per Share' label."
+        )
+
     # Stock distribution: Award Shares / (Shares Traded|Sold) / Shares Issued
     block_dist = (_neighbor_block_right(boxes, "Award Shares") or
                   _neighbor_block_right(boxes, "Shares Traded") or
@@ -99,8 +113,24 @@ def parse_pdf(pdf_path: Path) -> Dict[str, Optional[str]]:
     lines_sd = [ln for ln in block_dist.splitlines() if ln.strip()]
     grant = _clean_num(lines_sd[0]) if len(lines_sd) >= 1 else None
     withheld = _clean_num(lines_sd[1]) if len(lines_sd) >= 2 else None
-    withheld = abs(int(round(withheld)))
     issued = _clean_num(lines_sd[2]) if len(lines_sd) >= 3 else None
+
+    if grant is None:
+        raise ValueError(
+            "Could not extract granted share count from PDF. "
+            "Expected numeric values next to 'Award Shares', 'Shares Traded', or 'Shares Sold' label."
+        )
+    if withheld is None:
+        raise ValueError(
+            f"Could not extract withheld share count from PDF (granted={grant}). "
+            "Expected a second numeric value in the share-distribution block."
+        )
+    withheld = abs(int(round(withheld)))
+    if issued is None:
+        raise ValueError(
+            f"Could not extract issued share count from PDF (granted={grant}, withheld={withheld}). "
+            "Expected a third numeric value in the share-distribution block."
+        )
 
     # NEW: Award Date
     award_date_block = _neighbor_block_right(boxes, "Award Date") or ""
@@ -120,9 +150,12 @@ def parse_pdf(pdf_path: Path) -> Dict[str, Optional[str]]:
                 award_number = value[0]
                 break
 
-    # Validate Issued field:
-    if issued != grant - withheld:
-        raise ValueError(f"Issued ({issued}) != Granted ({grant}) - Withheld ({withheld})")
+    # Validate Issued == Granted - Withheld
+    if int(round(issued)) != int(round(grant)) - withheld:
+        raise ValueError(
+            f"Data integrity check failed: Issued ({issued}) != Granted ({grant}) - Withheld ({withheld}). "
+            "The PDF may use an unexpected layout or the share counts are inconsistent."
+        )
 
     return {
         "Release Date": date_out,
