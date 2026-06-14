@@ -282,6 +282,41 @@ with st.expander(
             _merge_releases(new_rows)
             st.session_state.parsed_pdf_keys = current_keys
 
+    # ── Load every PDF in a folder ────────────────────────────────────────────
+    st.caption("…or load every PDF in a folder on this machine:")
+    folder_col, btn_col = st.columns([4, 1])
+    default_dir = _ROOT / "release-confirmations"
+    folder_str = folder_col.text_input(
+        "Folder path",
+        value=str(default_dir) if default_dir.exists() else "",
+        label_visibility="collapsed",
+        placeholder="/path/to/release-confirmations",
+    )
+    if btn_col.button("Load folder", width="stretch"):
+        folder = Path(folder_str).expanduser()
+        if not folder.is_dir():
+            st.error(f"Not a folder: {folder}")
+        else:
+            pdfs = sorted(folder.glob("*.pdf"))
+            if not pdfs:
+                st.warning(f"No PDF files found in {folder}.")
+            else:
+                new_rows, errors = [], {}
+                for p in pdfs:
+                    try:
+                        new_rows.append(_parse_pdf_path(p))
+                    except Exception as exc:
+                        errors[p.name] = str(exc)
+                for fname, msg in errors.items():
+                    st.error(f"**{fname}**: {msg}")
+                added = _merge_releases(new_rows)
+                st.success(
+                    f"Parsed {len(new_rows)} PDF(s) from folder; "
+                    f"added {added} new release(s)."
+                )
+                st.session_state.pop("releases_editor", None)
+                st.rerun()
+
     if not st.session_state.releases_df.empty:
         edited_releases = st.data_editor(
             st.session_state.releases_df,
