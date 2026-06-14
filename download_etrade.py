@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Download all "Confirmation of Release" PDFs from E*Trade benefit history.
+Download all "Confirmation of Release" PDFs from E*Trade.
 
 Usage:
     python download_etrade.py
@@ -9,26 +9,41 @@ First run: opens a browser window so you can log in. The session is saved to
 .etrade_session.json and all future runs operate headlessly — no visible window,
 no focus stealing, no lingering tabs.  Delete .etrade_session.json to force a
 fresh login.
+
+Source of truth
+---------------
+This uses the "Stock Plan Confirmations" page
+(https://us.etrade.com/etx/sp/stockplan#/myAccount/stockPlanConfirmations),
+which is backed by a JSON API that returns an authoritative list of *every*
+confirmation in a date range, each with a unique confirmationId.  We download
+each PDF directly by that id.
+
+This is far more reliable than the older "Benefit History" approach, which
+required expanding every grant row and clicking 100+ buttons, then correlating
+asynchronously-arriving PDFs back to their button — a race that could silently
+drop or duplicate releases (and under-count total holdings as a result).
 """
 
 import asyncio
+import datetime as dt
 import importlib.util
 import sys
 from pathlib import Path
 from typing import Optional
-from urllib.parse import parse_qs, urlparse
 from playwright.async_api import async_playwright
 
-ETRADE_URL = "https://us.etrade.com/etx/sp/stockplan#/myAccount/benefitHistory"
+# The page we log in against and scrape the API token from.
+ETRADE_URL = "https://us.etrade.com/etx/sp/stockplan#/myAccount/stockPlanConfirmations"
+# JSON API that lists confirmations for a date range.
+CONFIRMATIONS_API = "https://us.etrade.com/webapisp/stockplan/ah/confirmations.json"
+# Per-confirmation PDF endpoint (eId = encrypted employee id, cId = confirmationId).
+PDF_API = "https://us.etrade.com/webapisp/stockplan/pdf/getReleaseConfirmation.pdf"
+# Pull everything from the start of the first grant year to today.
+START_DATE = "1/1/2018"
+
 OUTPUT_DIR = Path(__file__).parent / "release-confirmations"
 BIN_DIR = Path(__file__).parent / "bin"
 SESSION_FILE = Path(__file__).parent / ".etrade_session.json"
-BUTTON_TEXT = "View Confirmation of Release"
-# Exact-text match. NB: `button:has-text(...)` resolves TWO matches per button
-# (Playwright subtree substring matching), so it would double every release and
-# waste a timeout on each phantom. `:text-is` (exact) yields one match per button.
-BUTTON_SELECTOR = f'button:text-is("{BUTTON_TEXT}")'
-DOWNLOAD_TIMEOUT_S = 5
 
 # Load rename-release-confirmations (hyphenated name requires importlib)
 sys.path.insert(0, str(BIN_DIR))
@@ -42,11 +57,12 @@ rename_file = _mod.rename_file
 from parse_pdf import parse_pdf as _parse_pdf  # noqa: E402 (after sys.path insert)
 
 
-async def _rename_temp(tmp: Path) -> Optional[str]:
+def _rename_temp(tmp: Path) -> Optional[str]:
     """Rename a downloaded temp PDF to its canonical name.
 
     Returns the final filename, or None if the canonical file was already on
-    disk (in which case the temp file is deleted and the download is skipped).
+    disk (in which case the temp file is deleted and the download is skipped —
+    this makes re-runs idempotent).
     """
     try:
         meta = _parse_pdf(tmp)
@@ -56,7 +72,7 @@ async def _rename_temp(tmp: Path) -> Optional[str]:
 
     final = rename_file(tmp)
     if final is None:
-        # parse failed entirely — use a fallback name
+        # parse failed entirely — use a fallback name so nothing is lost
         fallback = OUTPUT_DIR / f"confirmation_{tmp.stem.lstrip('_tmp_')}.pdf"
         tmp.rename(fallback)
         return fallback.name
@@ -84,6 +100,39 @@ async def do_login(p) -> None:
     await browser.close()
 
 
+async def _capture_api_token(page) -> dict:
+    """Load the confirmations page and capture the params the SPA uses to call
+    the JSON API: the encrypted employee id and the per-session `stk1` token.
+
+    The page fires a confirmations.json POST on load; we read both values off
+    that request rather than hard-coding them.
+    """
+    import json as _json
+
+    token: dict = {}
+
+    async def on_request(req):
+        if "confirmations.json" in req.url and req.method == "POST" and req.post_data:
+            try:
+                token["eId"] = _json.loads(req.post_data)["value"]["encryptedEmployeeId"]
+                headers = await req.all_headers()
+                if "stk1" in headers:
+                    token["stk1"] = headers["stk1"]
+            except Exception:
+                pass
+
+    page.on("request", on_request)
+    await page.goto(ETRADE_URL)
+    await page.wait_for_load_state("load")
+    # The SPA renders and fires the API call asynchronously; give it a moment.
+    for _ in range(20):
+        await asyncio.sleep(0.5)
+        if "eId" in token and "stk1" in token:
+            break
+    page.remove_listener("request", on_request)
+    return token
+
+
 async def main():
     OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -99,128 +148,85 @@ async def main():
         )
         page = await context.new_page()
 
-        print("Loading benefit history page...", end=" ", flush=True)
-        await page.goto(ETRADE_URL)
-        await page.wait_for_load_state("load")
-        await asyncio.sleep(3)  # let the SPA finish rendering
+        print("Loading Stock Plan Confirmations page...", end=" ", flush=True)
+        token = await _capture_api_token(page)
 
         if await page.locator('input[type="password"]').count() > 0:
             SESSION_FILE.unlink(missing_ok=True)
             print("\nSession has expired. Re-run to log in again.")
             await browser.close()
             sys.exit(1)
+
+        if "eId" not in token or "stk1" not in token:
+            print("\nCould not read the API token from the page. "
+                  "E*Trade may have changed their site.")
+            await browser.close()
+            sys.exit(1)
         print("done.")
 
-        # Step 1: expand the "Restricted Stock (RS)" section (collapsed by default)
-        print('Expanding "Restricted Stock (RS)" section...', end=' ', flush=True)
-        await page.locator('button:has-text("Restricted Stock (RS)")').click()
-        await asyncio.sleep(1.5)
-        print('done.')
-
-        # Step 2: "View All" loads grants beyond the initial page — click it if present.
-        # Use text-is (exact, case-sensitive) to avoid matching nav "View all X" buttons.
-        view_all = page.locator('button:text-is("View All")')
-        if await view_all.count() > 0:
-            print('Loading all grants ("View All")...', end=' ', flush=True)
-            await view_all.click()
-            await asyncio.sleep(2)
-            print('done.')
-
-        # Step 3: expand all grant rows to reveal individual release rows
-        print('Expanding all rows...', end=' ', flush=True)
-        await page.locator('[aria-label="expand all rows"]').click()
-
-        # Wait for at least one confirmation button to appear, then poll until the
-        # count stabilises — rows render asynchronously so a premature count is wrong.
-        await page.wait_for_selector(BUTTON_SELECTOR, timeout=20_000)
-        prev_count = -1
-        stable_ticks = 0
-        for _ in range(30):  # hard cap: 30 s max
-            await asyncio.sleep(1)
-            cur_count = await page.locator(BUTTON_SELECTOR).count()
-            if cur_count > 0 and cur_count == prev_count:
-                stable_ticks += 1
-                if stable_ticks >= 3:
-                    break
-            else:
-                stable_ticks = 0
-                prev_count = cur_count
-        count = prev_count
-        print(f'done. ({count} button(s) found)')
+        # Fetch the authoritative list of confirmations for the full date range.
+        print("Fetching confirmation list...", end=" ", flush=True)
+        today = dt.date.today().strftime("%-m/%-d/%Y")
+        payload = {"value": {
+            "encryptedEmployeeId": token["eId"],
+            "taxYear": "",
+            "startDate": START_DATE,
+            "endDate": today,
+            "planTypeCode": "All",
+            "appType": "STOCKPLAN",
+        }}
+        resp = await context.request.post(
+            CONFIRMATIONS_API,
+            data=payload,
+            headers={
+                "content-type": "application/json; charset=UTF-8",
+                "accept": "application/json, text/plain, */*",
+                "stk1": token["stk1"],
+            },
+        )
+        body = await resp.json()
+        try:
+            confirmations = body["data"]["confirmation"]["confirmations"]
+        except (TypeError, KeyError):
+            print("\nUnexpected API response — could not read confirmation list.")
+            await browser.close()
+            sys.exit(1)
+        count = len(confirmations)
+        print(f"done. ({count} confirmation(s) found)")
 
         if count == 0:
-            print('No "View Confirmation of Release" buttons found on the page.')
+            print("No confirmations found in the selected date range.")
             await browser.close()
             sys.exit(1)
 
-        print(f"Found {count} button(s). Starting downloads...\n")
+        print(f"Starting downloads...\n")
         downloaded, skipped, failed = 0, 0, 0
 
-        # Route-based PDF interception: intercepts getReleaseConfirmation.pdf
-        # requests at the network level and uses route.fetch() to read the body
-        # before the browser can discard it (which happens with page navigations).
-        pdf_queue: asyncio.Queue[bytes] = asyncio.Queue()
-        new_pages: list = []
-        seen_ids: set[str] = set()  # safety net: dedupe by eId+cId in case a click fires twice
-
-        async def handle_pdf_route(route, *_):
-            params = parse_qs(urlparse(route.request.url).query)
-            key = (params.get("eId", [""])[0], params.get("cId", [""])[0])
-            if key in seen_ids:
-                await route.continue_()
-                return
+        for i, conf in enumerate(confirmations):
+            cid = conf.get("confirmationId")
+            date = conf.get("confirmationDate", "?")
+            print(f"[{i + 1}/{count}] {date} (cId {cid})...", end=" ", flush=True)
             try:
-                response = await route.fetch()
-                body = await response.body()
-                if body[:4] == b"%PDF":
-                    seen_ids.add(key)
-                    await pdf_queue.put(body)
-                await route.fulfill(response=response)
-            except Exception:
-                await route.continue_()
-
-        async def on_new_page(new_page):
-            new_pages.append(new_page)
-
-        await context.route("**/getReleaseConfirmation.pdf*", handle_pdf_route)
-        context.on("page", on_new_page)
-
-        try:
-            for i in range(count):
-                btn = page.locator(BUTTON_SELECTOR).nth(i)
-                print(f"[{i + 1}/{count}] Clicking...", end=" ", flush=True)
-                try:
-                    await btn.click()
-                    pdf_bytes = await asyncio.wait_for(
-                        pdf_queue.get(), timeout=DOWNLOAD_TIMEOUT_S
-                    )
-                    tmp = OUTPUT_DIR / f"_tmp_{i:03d}.pdf"
-                    tmp.write_bytes(pdf_bytes)
-                    name = await _rename_temp(tmp)
-                    if name is None:
-                        print("skipped (already on disk)")
-                        skipped += 1
-                    else:
-                        print(f"saved: {name}")
-                        downloaded += 1
-                except asyncio.TimeoutError:
-                    print(f"FAILED (no PDF received within {DOWNLOAD_TIMEOUT_S}s)")
+                r = await context.request.get(
+                    PDF_API, params={"eId": token["eId"], "cId": cid}
+                )
+                data = await r.body()
+                if data[:4] != b"%PDF":
+                    print("FAILED (response was not a PDF)")
                     failed += 1
-                except Exception as exc:
-                    print(f"ERROR: {exc}")
-                    failed += 1
-
-                # Close any new tabs that opened during this button click
-                for np in new_pages:
-                    try:
-                        await np.close()
-                    except Exception:
-                        pass
-                new_pages.clear()
-                await asyncio.sleep(0.5)
-        finally:
-            await context.unroute("**/getReleaseConfirmation.pdf*", handle_pdf_route)
-            context.remove_listener("page", on_new_page)
+                    continue
+                tmp = OUTPUT_DIR / f"_tmp_{cid}.pdf"
+                tmp.write_bytes(data)
+                name = _rename_temp(tmp)
+                if name is None:
+                    print("skipped (already on disk)")
+                    skipped += 1
+                else:
+                    print(f"saved: {name}")
+                    downloaded += 1
+            except Exception as exc:
+                print(f"ERROR: {exc}")
+                failed += 1
 
         print(f"\nDone. Downloaded: {downloaded}  Skipped: {skipped}  Failed: {failed}")
         print(f"Files are in: {OUTPUT_DIR}")
