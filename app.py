@@ -367,7 +367,8 @@ with st.expander(
 with st.expander("Sales", expanded=False):
     st.caption(
         "Voluntary sell transactions (not tax-withholding). "
-        "One row per sale — date in YYYY-MM-DD, price in USD."
+        "One row per sale — date in YYYY-MM-DD, price in USD. "
+        f"Saved to and auto-loaded from `{_SALES_CSV.relative_to(_ROOT)}`."
     )
     edited_sales = st.data_editor(
         st.session_state.sales_df,
@@ -397,6 +398,18 @@ with st.expander("Sales", expanded=False):
             ),
         },
     )
+
+    if st.button("Save sales", type="secondary"):
+        to_save = edited_sales.dropna(how="all")
+        shares_num = pd.to_numeric(
+            to_save.get("Shares", pd.Series(dtype=float)), errors="coerce"
+        )
+        to_save = to_save[shares_num.fillna(0) > 0].reset_index(drop=True)
+        _SALES_CSV.parent.mkdir(parents=True, exist_ok=True)
+        to_save.to_csv(_SALES_CSV, index=False)
+        st.session_state.sales_df = to_save
+        st.session_state.results = None
+        st.success(f"Saved {len(to_save)} sale(s) to {_SALES_CSV.relative_to(_ROOT)}.")
 
 
 default_xr = _load_default_exrates()
@@ -456,7 +469,7 @@ else:
 
 
 # ════════════════════════════════════════════════════════════════════════════════
-# Calculate button
+# Calculation (runs automatically whenever the inputs change)
 # ════════════════════════════════════════════════════════════════════════════════
 st.divider()
 
@@ -468,15 +481,16 @@ if not can_calculate:
     if combined_xr is None:
         missing.append("exchange rates")
     st.info(f"Waiting for: {', '.join(missing)}.")
-
-if st.button("Calculate Gains & Losses", type="primary", disabled=not can_calculate):
+    st.session_state.results = None
+else:
     try:
-        with st.spinner("Applying HMRC share-identification rules…"):
-            events = _run_calculation(edited_releases, edited_sales, combined_xr)
-        st.session_state.results = events
+        st.session_state.results = _run_calculation(
+            edited_releases, edited_sales, combined_xr
+        )
     except Exception as exc:
-        st.error(f"Calculation failed: {exc}")
-        st.session_state.results = None
+        # In-progress edits (e.g. a half-typed date) can transiently fail —
+        # surface the reason but keep the last good results on screen.
+        st.warning(f"Could not recalculate yet: {exc}")
 
 
 # ════════════════════════════════════════════════════════════════════════════════
