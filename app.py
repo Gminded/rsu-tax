@@ -29,7 +29,12 @@ _ROOT      = Path(__file__).parent
 _EXRATES_DIR = _ROOT / "monthly-exchange-rates-by-hmrc"
 _SALES_CSV   = _ROOT / "sales" / "sales.csv"
 
-_RELEASE_COLS = ["Release Date", "Granted", "Sold", "Issued", "Price per share ($)"]
+_RELEASE_COLS = ["Release Date", "Granted", "Sold", "Issued", "Price per share ($)",
+                 "Award Date", "Award Number"]
+# A release is uniquely identified by its grant (Award Number) and the date it
+# vested. Two different grants can vest on the same date with identical share
+# counts and price, so we must NOT deduplicate on (Release Date, Granted) alone.
+_RELEASE_KEY  = ["Release Date", "Award Number"]
 _SALES_COLS   = ["Date", "Shares", "Price per share ($)"]
 _XR_FIELDS    = ["Country/Territories", "Currency", "Currency code",
                  "Currency units per £1", "Start Date", "End Date"]
@@ -77,6 +82,34 @@ def _load_default_exrates() -> pd.DataFrame | None:
     df = pd.DataFrame(rows)
     df["Currency units per £1"] = pd.to_numeric(df["Currency units per £1"], errors="coerce")
     return df
+
+
+def _parse_pdf_path(path: Path) -> dict:
+    """Parse a single release-confirmation PDF into a releases-table row."""
+    result = parse_pdf(path)
+    return {k: result.get(k) for k in _RELEASE_COLS}
+
+
+def _merge_releases(new_rows: list[dict]) -> int:
+    """
+    Merge freshly parsed release rows into session state, deduplicating on
+    (Release Date, Award Number).  Returns the number of rows actually added.
+    """
+    if not new_rows:
+        return 0
+    before = len(st.session_state.releases_df)
+    new_df = pd.DataFrame(new_rows, columns=_RELEASE_COLS)
+    existing = st.session_state.releases_df
+    parts = [existing, new_df] if not existing.empty else [new_df]
+    combined = (
+        pd.concat(parts, ignore_index=True)
+        .drop_duplicates(subset=_RELEASE_KEY, keep="last")
+        .sort_values("Release Date")
+        .reset_index(drop=True)
+    )
+    st.session_state.releases_df = combined
+    st.session_state.results = None  # invalidate previous results
+    return len(combined) - before
 
 
 def _tax_year_summary(events: pd.DataFrame) -> pd.DataFrame:
@@ -236,8 +269,7 @@ with st.expander(
                     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
                         tmp.write(uf.read())
                         tmp_path = Path(tmp.name)
-                    result = parse_pdf(tmp_path)
-                    new_rows.append({k: result.get(k) for k in _RELEASE_COLS})
+                    new_rows.append(_parse_pdf_path(tmp_path))
                 except Exception as exc:
                     errors[uf.name] = str(exc)
                 finally:
@@ -247,21 +279,7 @@ with st.expander(
             for fname, msg in errors.items():
                 st.error(f"**{fname}**: {msg}")
 
-            if new_rows:
-                new_df = (
-                    pd.DataFrame(new_rows)
-                    .sort_values("Release Date")
-                    .reset_index(drop=True)
-                )
-                combined = (
-                    pd.concat([st.session_state.releases_df, new_df])
-                    .drop_duplicates(subset=["Release Date", "Granted"], keep="last")
-                    .sort_values("Release Date")
-                    .reset_index(drop=True)
-                )
-                st.session_state.releases_df = combined
-                st.session_state.results = None  # invalidate previous results
-
+            _merge_releases(new_rows)
             st.session_state.parsed_pdf_keys = current_keys
 
     if not st.session_state.releases_df.empty:
@@ -289,6 +307,14 @@ with st.expander(
                 "Price per share ($)": st.column_config.NumberColumn(
                     "Price / share ($)", format="$%.4f", step=0.0001, min_value=0.0,
                     help="Market value per share on the release date in USD, e.g. 12.3456"
+                ),
+                "Award Date": st.column_config.TextColumn(
+                    "Award Date", help="Date the grant was awarded (YYYY-MM-DD)"
+                ),
+                "Award Number": st.column_config.TextColumn(
+                    "Award #",
+                    help="Grant identifier. Distinguishes grants that vest on the "
+                         "same date with identical share counts."
                 ),
             },
         )
