@@ -223,10 +223,17 @@ def _run_calculation(releases_df, sales_df, exrates_df) -> pd.DataFrame:
         events[ccb.PRICE_PER_SHARE_USD_LABEL] / events[ccb.GBP_USD_LABEL]
     )
 
-    gains, holdings, matching_notes = ccb.get_gains_and_holdings(events)
+    gains, holdings, matching_notes, owned = ccb.get_gains_and_holdings(events)
     events[ccb.GAINS_LABEL]        = gains
     events[ccb.HOLDINGS_GBP_LABEL] = holdings
+    events[ccb.OWNED_SHARES_LABEL] = owned
     events[ccb.MATCHING_LABEL]     = matching_notes
+
+    # Section 104 weighted-average cost per share held at each point.
+    owned_series = pd.Series(owned, index=events.index)
+    events[ccb.AVG_COST_GBP_LABEL] = events[ccb.HOLDINGS_GBP_LABEL].where(
+        owned_series > 1e-9
+    ) / owned_series.where(owned_series > 1e-9)
 
     return events
 
@@ -519,7 +526,8 @@ if st.session_state.results is not None:
         ccb.TYPE_LABEL, ccb.DATE_LABEL,
         ccb.GRANTED_LABEL, ccb.SOLD_LABEL, ccb.ISSUED_LABEL,
         ccb.PRICE_PER_SHARE_USD_LABEL, ccb.GBP_USD_LABEL,
-        ccb.PRICE_PER_SHARE_GBP_LABEL, ccb.HOLDINGS_GBP_LABEL,
+        ccb.PRICE_PER_SHARE_GBP_LABEL,
+        ccb.OWNED_SHARES_LABEL, ccb.AVG_COST_GBP_LABEL, ccb.HOLDINGS_GBP_LABEL,
         ccb.GAINS_LABEL, ccb.MATCHING_LABEL,
     ]
     display = events[output_cols].copy()
@@ -535,6 +543,8 @@ if st.session_state.results is not None:
                 ccb.PRICE_PER_SHARE_USD_LABEL: "${:.4f}",
                 ccb.GBP_USD_LABEL:             "{:.4f}",
                 ccb.PRICE_PER_SHARE_GBP_LABEL: "£{:.4f}",
+                ccb.OWNED_SHARES_LABEL:        "{:,.0f}",
+                ccb.AVG_COST_GBP_LABEL:        "£{:.4f}",
                 ccb.HOLDINGS_GBP_LABEL:        "£{:,.2f}",
                 ccb.GAINS_LABEL:               "£{:,.2f}",
                 ccb.GRANTED_LABEL:             "{:.0f}",

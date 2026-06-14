@@ -31,6 +31,8 @@ PRICE_PER_SHARE_USD_LABEL = "Price per share ($)"
 PRICE_PER_SHARE_GBP_LABEL = "Price per share (GBP)"
 GBP_USD_LABEL             = "GBP/USD"
 HOLDINGS_GBP_LABEL        = "Holdings (GBP)"
+OWNED_SHARES_LABEL        = "Owned shares"
+AVG_COST_GBP_LABEL        = "Avg cost / share (GBP)"
 GAINS_LABEL               = "Gains / Losses (GBP)"
 MATCHING_LABEL            = "Matching Rule"
 
@@ -99,11 +101,13 @@ def load_sales(sales_csv: str) -> pd.DataFrame:
 
 def get_gains_and_holdings(events: pd.DataFrame):
     """
-    Returns (gains, pool_costs_after, matching_notes) — one entry per row in events.
+    Returns (gains, pool_costs_after, matching_notes, pool_units_after) — one
+    entry per row in events.
 
     Buy rows enter the Section 104 pool to the extent they are not consumed by
     same-day or 30-day matching against a Sell.  WithholdingSell rows are
-    informational (gain = 0, pool unchanged).
+    informational (gain = 0, pool unchanged).  pool_units_after is the number of
+    shares still held in the Section 104 pool immediately after each event.
     """
     records = events.reset_index(drop=True).to_dict("records")
     n = len(records)
@@ -184,6 +188,7 @@ def get_gains_and_holdings(events: pd.DataFrame):
 
     gains          = []
     pool_costs_out = []
+    pool_units_out = []
     matching_notes = []
 
     for i, rec in enumerate(records):
@@ -198,6 +203,7 @@ def get_gains_and_holdings(events: pd.DataFrame):
                 pool_cost  += into_pool * price_gbp
             gains.append(0.0)
             pool_costs_out.append(pool_cost)
+            pool_units_out.append(pool_units)
             if buy_consumed[i] > 1e-9:
                 matching_notes.append(
                     f"{buy_consumed[i]:.0f} sh matched by rule; "
@@ -211,6 +217,7 @@ def get_gains_and_holdings(events: pd.DataFrame):
             # (cost = proceeds = market value on release date under same-day rule).
             gains.append(0.0)
             pool_costs_out.append(pool_cost)
+            pool_units_out.append(pool_units)
             matching_notes.append("same-day rule (tax withholding)")
 
         else:  # SELL_TYPE
@@ -241,9 +248,10 @@ def get_gains_and_holdings(events: pd.DataFrame):
 
             gains.append(proceeds - allowable)
             pool_costs_out.append(pool_cost)
+            pool_units_out.append(pool_units)
             matching_notes.append(", ".join(notes) if notes else "Section 104")
 
-    return gains, pool_costs_out, matching_notes
+    return gains, pool_costs_out, matching_notes, pool_units_out
 
 
 # ---------- Tax-year summary ----------
@@ -382,7 +390,7 @@ def main(argv):
     )
 
     # --- HMRC matching + pool calculation ---
-    gains, holdings, matching_notes = get_gains_and_holdings(events)
+    gains, holdings, matching_notes, _ = get_gains_and_holdings(events)
     events[GAINS_LABEL]   = gains
     events[HOLDINGS_GBP_LABEL] = holdings
     events[MATCHING_LABEL]     = matching_notes

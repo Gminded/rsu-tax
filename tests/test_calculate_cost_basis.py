@@ -64,7 +64,7 @@ class TestSection104Pool:
             (ccb.BUY_TYPE,  "2020-01-01", 100, 10.0),
             (ccb.SELL_TYPE, "2020-06-01",  50, 15.0),
         ])
-        gains, holdings, _ = ccb.get_gains_and_holdings(events)
+        gains, holdings, _, _ = ccb.get_gains_and_holdings(events)
         assert gains[0] == pytest.approx(0.0)
         assert gains[1] == pytest.approx(50 * 15.0 - 50 * 10.0)   # 250
         assert holdings[0] == pytest.approx(100 * 10.0)
@@ -77,7 +77,7 @@ class TestSection104Pool:
             (ccb.BUY_TYPE,  "2020-03-01", 100, 20.0),
             (ccb.SELL_TYPE, "2020-06-01", 100, 18.0),
         ])
-        gains, _, _ = ccb.get_gains_and_holdings(events)
+        gains, _, _, _ = ccb.get_gains_and_holdings(events)
         # pool cost = 3000; sell 100 of 200 → allowable = 1500; proceeds = 1800
         assert gains[2] == pytest.approx(1800.0 - 1500.0)
 
@@ -86,7 +86,7 @@ class TestSection104Pool:
             (ccb.BUY_TYPE,  "2020-01-01", 200, 10.0),
             (ccb.SELL_TYPE, "2020-06-01",  75, 12.0),
         ])
-        _, holdings, _ = ccb.get_gains_and_holdings(events)
+        _, holdings, _, _ = ccb.get_gains_and_holdings(events)
         assert holdings[1] == pytest.approx(125 * 10.0)
 
     def test_sequential_sells_deplete_pool(self, ccb, mk):
@@ -96,7 +96,7 @@ class TestSection104Pool:
             (ccb.SELL_TYPE, "2020-09-01", 100, 14.0),
             (ccb.SELL_TYPE, "2020-12-01", 100, 16.0),
         ])
-        gains, holdings, _ = ccb.get_gains_and_holdings(events)
+        gains, holdings, _, _ = ccb.get_gains_and_holdings(events)
         assert gains[1] == pytest.approx(100 * (12 - 10))
         assert gains[2] == pytest.approx(100 * (14 - 10))
         assert gains[3] == pytest.approx(100 * (16 - 10))
@@ -107,7 +107,7 @@ class TestSection104Pool:
             (ccb.BUY_TYPE,  "2020-01-01", 100, 10.0),
             (ccb.SELL_TYPE, "2020-06-01", 100, 12.0),
         ])
-        gains, holdings, _ = ccb.get_gains_and_holdings(events)
+        gains, holdings, _, _ = ccb.get_gains_and_holdings(events)
         assert gains[1] == pytest.approx(100 * (12 - 10))
         assert holdings[1] == pytest.approx(0.0)
 
@@ -140,7 +140,7 @@ class TestSameDayRule:
             (ccb.BUY_TYPE,  "2020-06-01",  50, 20.0),
             (ccb.SELL_TYPE, "2020-06-01",  50, 25.0),
         ])
-        gains, _, _ = ccb.get_gains_and_holdings(events)
+        gains, _, _, _ = ccb.get_gains_and_holdings(events)
         assert gains[2] == pytest.approx(50 * 25 - 50 * 20)   # 250
 
     def test_same_day_partial_match_rest_from_pool(self, ccb, mk):
@@ -150,7 +150,7 @@ class TestSameDayRule:
             (ccb.BUY_TYPE,  "2020-06-01",  50, 20.0),
             (ccb.SELL_TYPE, "2020-06-01", 150, 15.0),
         ])
-        gains, holdings, _ = ccb.get_gains_and_holdings(events)
+        gains, holdings, _, _ = ccb.get_gains_and_holdings(events)
         # same-day: 50 @ 20 → cost 1000; pool: 100 @ 10 → cost 1000; total cost = 2000
         expected_gain = 150 * 15 - (50 * 20 + 100 * 10)
         assert gains[2] == pytest.approx(expected_gain)
@@ -164,7 +164,7 @@ class TestSameDayRule:
             (ccb.BUY_TYPE,  "2020-06-01",  30, 12.0),
             (ccb.SELL_TYPE, "2020-06-01",  80, 14.0),
         ])
-        gains, _, _ = ccb.get_gains_and_holdings(events)
+        gains, _, _, _ = ccb.get_gains_and_holdings(events)
         # 30 same-day @ 12, 50 from pool @ 8
         expected_gain = 80 * 14 - (30 * 12 + 50 * 8)
         assert gains[2] == pytest.approx(expected_gain)
@@ -175,7 +175,7 @@ class TestSameDayRule:
             (ccb.BUY_TYPE,  "2020-06-01",  50, 20.0),
             (ccb.SELL_TYPE, "2020-06-01",  50, 25.0),
         ])
-        _, _, notes = ccb.get_gains_and_holdings(events)
+        _, _, notes, _ = ccb.get_gains_and_holdings(events)
         assert "same-day" in notes[2]
 
     def test_multiple_same_day_buys_consumed_fifo(self, ccb, mk):
@@ -185,7 +185,7 @@ class TestSameDayRule:
             (ccb.BUY_TYPE,  "2020-06-01", 40, 15.0),
             (ccb.SELL_TYPE, "2020-06-01", 50, 20.0),
         ])
-        gains, _, _ = ccb.get_gains_and_holdings(events)
+        gains, _, _, _ = ccb.get_gains_and_holdings(events)
         # 30 @ 10 + 20 @ 15 = 300 + 300 = 600; proceeds = 50*20 = 1000
         assert gains[2] == pytest.approx(1000 - (30 * 10 + 20 * 15))
 
@@ -200,7 +200,7 @@ class TestThirtyDayRule:
             (ccb.SELL_TYPE, "2020-06-01",  50, 12.0),
             (ccb.BUY_TYPE,  "2020-06-20",  50, 15.0),   # 19 days after sell
         ])
-        gains, _, notes = ccb.get_gains_and_holdings(events)
+        gains, _, notes, _ = ccb.get_gains_and_holdings(events)
         # Without 30-day: gain = 50*12 - 50*10 = 100
         # With 30-day:    gain = 50*12 - 50*15 = -150
         assert gains[1] == pytest.approx(50 * 12 - 50 * 15)
@@ -213,7 +213,7 @@ class TestThirtyDayRule:
             (ccb.SELL_TYPE, "2020-06-01",  50, 12.0),
             (ccb.BUY_TYPE,  "2020-07-01",  50, 15.0),   # exactly 30 days
         ])
-        gains, _, notes = ccb.get_gains_and_holdings(events)
+        gains, _, notes, _ = ccb.get_gains_and_holdings(events)
         assert gains[1] == pytest.approx(50 * 12 - 50 * 15)
         assert "30-day" in notes[1]
 
@@ -224,7 +224,7 @@ class TestThirtyDayRule:
             (ccb.SELL_TYPE, "2020-06-01",  50, 12.0),
             (ccb.BUY_TYPE,  "2020-07-02",  50, 15.0),   # 31 days after sell
         ])
-        gains, _, notes = ccb.get_gains_and_holdings(events)
+        gains, _, notes, _ = ccb.get_gains_and_holdings(events)
         assert gains[1] == pytest.approx(50 * 12 - 50 * 10)   # pool cost
         assert "30-day" not in notes[1]
 
@@ -235,7 +235,7 @@ class TestThirtyDayRule:
             (ccb.SELL_TYPE, "2020-06-01", 100, 12.0),
             (ccb.BUY_TYPE,  "2020-06-15",  60, 14.0),
         ])
-        gains, holdings, notes = ccb.get_gains_and_holdings(events)
+        gains, holdings, notes, _ = ccb.get_gains_and_holdings(events)
         expected_gain = 100 * 12 - (60 * 14 + 40 * 10)
         assert gains[1] == pytest.approx(expected_gain)
         assert "30-day" in notes[1]
@@ -251,7 +251,7 @@ class TestThirtyDayRule:
             (ccb.BUY_TYPE,  "2020-06-10",  60, 14.0),   # first in window
             (ccb.BUY_TYPE,  "2020-06-20",  50, 11.0),   # second in window
         ])
-        gains, _, _ = ccb.get_gains_and_holdings(events)
+        gains, _, _, _ = ccb.get_gains_and_holdings(events)
         # FIFO: 60 @ £14 (first buy), then 40 of 50 @ £11 (second buy); nothing from pool
         expected_gain = 100 * 12 - (60 * 14 + 40 * 11)
         assert gains[1] == pytest.approx(expected_gain)
@@ -262,7 +262,7 @@ class TestThirtyDayRule:
             (ccb.SELL_TYPE, "2020-06-01",  50, 12.0),
             (ccb.BUY_TYPE,  "2020-06-15",  50, 14.0),
         ])
-        _, _, notes = ccb.get_gains_and_holdings(events)
+        _, _, notes, _ = ccb.get_gains_and_holdings(events)
         assert "2020-06-15" in notes[1]
 
     def test_pool_unchanged_for_shares_consumed_by_30_day_rule(self, ccb, mk):
@@ -272,7 +272,7 @@ class TestThirtyDayRule:
             (ccb.SELL_TYPE, "2020-06-01", 100, 12.0),
             (ccb.BUY_TYPE,  "2020-06-15", 100, 14.0),   # fully consumed by 30-day rule
         ])
-        _, holdings, _ = ccb.get_gains_and_holdings(events)
+        _, holdings, _, _ = ccb.get_gains_and_holdings(events)
         # The sell is matched against the 30-day buy, not the pool — so the pool (100 sh
         # @ £10 = £1 000) is left intact after the sell.
         assert holdings[1] == pytest.approx(1000.0)
@@ -291,7 +291,7 @@ class TestRulePriority:
             (ccb.SELL_TYPE, "2020-06-01",  50, 25.0),
             (ccb.BUY_TYPE,  "2020-06-15",  50, 18.0),   # 30-day buy
         ])
-        gains, _, notes = ccb.get_gains_and_holdings(events)
+        gains, _, notes, _ = ccb.get_gains_and_holdings(events)
         # 30 same-day @ 20, then 20 from 30-day @ 18; remaining 0 from pool
         expected_gain = 50 * 25 - (30 * 20 + 20 * 18)
         assert gains[2] == pytest.approx(expected_gain)
@@ -304,7 +304,7 @@ class TestRulePriority:
             (ccb.SELL_TYPE, "2020-06-01",  50, 12.0),
             (ccb.BUY_TYPE,  "2020-06-15",  50, 14.0),
         ])
-        gains, _, _ = ccb.get_gains_and_holdings(events)
+        gains, _, _, _ = ccb.get_gains_and_holdings(events)
         # 30-day: 50 @ 14; NOT from pool @ 10
         assert gains[1] == pytest.approx(50 * 12 - 50 * 14)
 
@@ -317,7 +317,7 @@ class TestWithholdingSell:
             (ccb.BUY_TYPE,             "2020-01-01", 800, 10.0),
             (ccb.WITHHOLDING_SELL_TYPE, "2020-01-01", 200, 10.0),
         ])
-        gains, _, _ = ccb.get_gains_and_holdings(events)
+        gains, _, _, _ = ccb.get_gains_and_holdings(events)
         assert gains[1] == pytest.approx(0.0)
 
     def test_withholding_sell_does_not_deplete_pool(self, ccb, mk):
@@ -327,7 +327,7 @@ class TestWithholdingSell:
             (ccb.WITHHOLDING_SELL_TYPE, "2020-01-01", 200, 10.0),
             (ccb.SELL_TYPE,            "2020-06-01", 800, 12.0),
         ])
-        gains, holdings, _ = ccb.get_gains_and_holdings(events)
+        gains, holdings, _, _ = ccb.get_gains_and_holdings(events)
         assert gains[2] == pytest.approx(800 * (12 - 10))
         assert holdings[2] == pytest.approx(0.0)
 
@@ -336,7 +336,7 @@ class TestWithholdingSell:
             (ccb.BUY_TYPE,             "2020-01-01", 800, 10.0),
             (ccb.WITHHOLDING_SELL_TYPE, "2020-01-01", 200, 10.0),
         ])
-        _, _, notes = ccb.get_gains_and_holdings(events)
+        _, _, notes, _ = ccb.get_gains_and_holdings(events)
         assert "withholding" in notes[1].lower()
 
     def test_main_injects_withholding_sell_rows(self, ccb, tmp_path, capsys):
