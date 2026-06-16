@@ -43,7 +43,7 @@ Click **Calculate Gains & Losses** to run the full HS284 calculation. The result
 Execute `run.sh` to run the tools in sequence and go from a bunch of PDF files from e*trade and a list of sales to a full calculation of the gains and losses. Start with `run.sh -h` to see a description of the parameters.
 
 ### Stock Release Confirmations
-These can be obtained from e*trade as PDF files. In their website go to the "At work" section and select "My Account" -> "Benefit History". Expand "Restricted Stock (RS)" and click on the "View Confirmation of Release" links to download the files. For convenience you can use short names for the files (e.g. single digits or characters), then use `rename-release-confirmations.py` to automatically give them sensible names.
+These can be obtained from e*trade as PDF files. The easiest way is to run `download_etrade.py`, which logs in to E*Trade and downloads all release confirmation PDFs automatically. Alternatively, in their website go to the "At work" section and select "My Account" -> "Benefit History". Expand "Restricted Stock (RS)" and click on the "View Confirmation of Release" links to download the files. For convenience you can use short names for the files (e.g. single digits or characters), then use `rename-release-confirmations.py` to automatically give them sensible names.
 
 ### Sales
 The list of sales must be manually created. A sample file is provided in sales/sales.csv. Use the same format.
@@ -77,10 +77,18 @@ E*trade provides all the information relative to vested RSUs: release date, numb
   - Prints a capital-gains summary by UK tax year to stderr after generating the CSV.
 - **Flexible sales headers:** auto-detects typical columns (date, shares, USD price). If your headers differ, adjust the detection list in the script.
 
-### 3) `rename-release-confirmations.py`
+### 3) `download_etrade.py`
+Downloads all release confirmation PDFs from E*Trade automatically using Playwright.
+- On first run it opens a visible browser so you can log in; the session is saved to `.etrade_session.json` and subsequent runs are headless.
+- Uses the Stock Plan Confirmations JSON API to obtain an authoritative list of every confirmation, then downloads each PDF by its unique `confirmationId`.
+- Skips files that are already on disk, making re-runs idempotent.
+- Renames each downloaded PDF to its canonical name via `rename-release-confirmations.py`.
+- **Output:** PDFs saved to `release-confirmations/`.
+
+### 4) `rename-release-confirmations.py`
 A convenience script that renames PDFs using `parse_pdf` metadata.
 
-### 4) `parse_pdf.py` (module)
+### 5) `parse_pdf.py` (module)
 It provides a single function to be used in other scripts.
 - **Function:** `parse_pdf(path: Path) -> dict`
 - **Extracts:**  
