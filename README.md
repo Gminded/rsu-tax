@@ -49,7 +49,7 @@ These can be obtained from e*trade as PDF files. The easiest way is to run `down
 The list of sales must be manually created. A sample file is provided in sales/sales.csv. Use the same format.
 
 ### Exchange Rates
-The monthly exchange rates from HMRC that cover the period from January 2018 to November 2025 (or a later month if I remember to update this project) are already included. You can get more from https://www.trade-tariff.service.gov.uk/exchange_rates. Note that there exist no "official" exchange rates as such. HMRC accepts other sources too, e.g. your own bank or the Bank of England. However you must use the same source consistently throughout your calculations.
+The monthly exchange rates from HMRC that cover the period from January 2018 to November 2025 (or a later month if I remember to update this project) are already included. You can get more from https://www.trade-tariff.service.gov.uk/exchange_rates, or run `download-rates.sh` to download them automatically. Note that there exist no "official" exchange rates as such. HMRC accepts other sources too, e.g. your own bank or the Bank of England. However you must use the same source consistently throughout your calculations.
 
 ## Components
 
@@ -61,7 +61,13 @@ E*trade provides all the information relative to vested RSUs: release date, numb
 - Sorted by `Release Date` ascending.
 - **Output:** CSV to stdout.
 
-### 2) `calculate-cost-basis.py`
+### 2) `combine.py`
+Merges multiple HMRC monthly exchange-rate CSVs into a single file containing only the USD rows.
+- CLI that reads one or more HMRC monthly CSV files.
+- Extracts the `USA,Dollar,USD` row from each file and writes a combined CSV to stdout.
+- **Output:** CSV to stdout (fed into `calculate-cost-basis.py` via `run.sh`).
+
+### 3) `calculate-cost-basis.py`
 - **Inputs:**
   - Releases CSV (from `parse-stock-releases.py`)
   - FX table `exchange-rates.csv` (`Start Date`/`End Date` in `DD/MM/YYYY`, `Currency units per £1` = GBP→USD)
@@ -77,7 +83,7 @@ E*trade provides all the information relative to vested RSUs: release date, numb
   - Prints a capital-gains summary by UK tax year to stderr after generating the CSV.
 - **Flexible sales headers:** auto-detects typical columns (date, shares, USD price). If your headers differ, adjust the detection list in the script.
 
-### 3) `download_etrade.py`
+### 4) `download_etrade.py`
 Downloads all release confirmation PDFs from E*Trade automatically using Playwright.
 - On first run it opens a visible browser so you can log in; the session is saved to `.etrade_session.json` and subsequent runs are headless.
 - Uses the Stock Plan Confirmations JSON API to obtain an authoritative list of every confirmation, then downloads each PDF by its unique `confirmationId`.
@@ -85,10 +91,15 @@ Downloads all release confirmation PDFs from E*Trade automatically using Playwri
 - Renames each downloaded PDF to its canonical name via `rename-release-confirmations.py`.
 - **Output:** PDFs saved to `release-confirmations/`.
 
-### 4) `rename-release-confirmations.py`
+### 5) `download-rates.sh`
+Downloads HMRC monthly exchange-rate CSV files for every month from 2021 to the current year.
+- Iterates over years and months, fetching each CSV from the HMRC trade-tariff service.
+- Run from the directory where you want the files saved, or move them into `monthly-exchange-rates-by-hmrc/` afterwards.
+
+### 6) `rename-release-confirmations.py`
 A convenience script that renames PDFs using `parse_pdf` metadata.
 
-### 5) `parse_pdf.py` (module)
+### 7) `parse_pdf.py` (module)
 It provides a single function to be used in other scripts.
 - **Function:** `parse_pdf(path: Path) -> dict`
 - **Extracts:**  
