@@ -1,5 +1,5 @@
 """
-Tests for bin/calculate-cost-basis.py.
+Tests for scripts/calculate-cost-basis.py.
 
 Covers:
 - Section 104 pool arithmetic

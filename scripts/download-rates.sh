@@ -1,6 +1,6 @@
 #!/bin/bash
 
-for year in {2021..2025}
+for year in $(seq 2021 $(date +%Y))
 do
   for month in {1..12}
   do

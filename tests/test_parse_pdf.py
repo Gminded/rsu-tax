@@ -1,5 +1,5 @@
 """
-Tests for bin/parse_pdf.py.
+Tests for scripts/parse_pdf.py.
 
 Full end-to-end parsing of real PDFs is not tested here (that would require
 e*trade fixture files).  Instead we test every helper function in isolation

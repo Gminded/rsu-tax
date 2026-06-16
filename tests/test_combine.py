@@ -1,4 +1,4 @@
-"""Tests for bin/combine.py — combines HMRC monthly exchange-rate CSVs."""
+"""Tests for scripts/combine.py — combines HMRC monthly exchange-rate CSVs."""
 import pytest
 
 

@@ -1,9 +1,24 @@
 #!/usr/bin/env python3
+# Copyright (C) 2025 Gianluca Guidi
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, see
+# <https://www.gnu.org/licenses/>.
 """
 Download all "Confirmation of Release" PDFs from E*Trade.
 
 Usage:
-    python download_etrade.py
+    python scripts/download_etrade.py
 
 First run: opens a browser window so you can log in. The session is saved to
 .etrade_session.json and all future runs operate headlessly — no visible window,
@@ -41,14 +56,15 @@ PDF_API = "https://us.etrade.com/webapisp/stockplan/pdf/getReleaseConfirmation.p
 # Pull everything from the start of the first grant year to today.
 START_DATE = "1/1/2018"
 
-OUTPUT_DIR = Path(__file__).parent / "release-confirmations"
-BIN_DIR = Path(__file__).parent / "bin"
-SESSION_FILE = Path(__file__).parent / ".etrade_session.json"
+SCRIPTS_DIR = Path(__file__).parent
+PROJECT_DIR = SCRIPTS_DIR.parent
+OUTPUT_DIR = PROJECT_DIR / "release-confirmations"
+SESSION_FILE = PROJECT_DIR / ".etrade_session.json"
 
 # Load rename-release-confirmations (hyphenated name requires importlib)
-sys.path.insert(0, str(BIN_DIR))
+sys.path.insert(0, str(SCRIPTS_DIR))
 _spec = importlib.util.spec_from_file_location(
-    "rename_rc", BIN_DIR / "rename-release-confirmations.py"
+    "rename_rc", SCRIPTS_DIR / "rename-release-confirmations.py"
 )
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)

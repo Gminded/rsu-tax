@@ -1,5 +1,5 @@
 """
-Shared fixtures: load the bin/ modules (some have hyphens in their names,
+Shared fixtures: load the scripts/ modules (some have hyphens in their names,
 which prevents normal imports).
 """
 import sys
@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-BIN = Path(__file__).parent.parent / "bin"
+BIN = Path(__file__).parent.parent / "scripts"
 sys.path.insert(0, str(BIN))   # lets parse_pdf be importable by other modules
 
 
