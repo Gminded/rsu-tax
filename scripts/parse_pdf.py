@@ -85,12 +85,16 @@ def parse_pdf(pdf_path: Path) -> Dict[str, Optional[str]]:
         if date_raw:
             date_out = _parse_mmddyyyy(date_raw)
 
-    # Market Value Per Share (first line in the same 3–5 line block starting with "$")
+    # Per-share dollar amounts share one cell, listed in column order:
+    #   [0] Market Value Per Share, [1] Award Price Per Share, [2] Sale Price Per Share
+    # The Sale Price line is present only when shares were actually sold on the
+    # market ("Shares Sold"); net-settled releases ("Shares Traded") omit it, in
+    # which case the withheld shares are settled at market value (no gain).
     block_mv = _neighbor_block_right(boxes, "Market Value Per Share") or block or ""
     lines_mv = [ln for ln in block_mv.splitlines() if ln.strip()]
-    # heuristic: first line starting with $ is the market value per share
-    mv_raw = next((ln.strip() for ln in lines_mv if ln.strip().startswith("$")), None)
-    mv = _clean_num(mv_raw)
+    dollar_lines = [ln.strip() for ln in lines_mv if ln.strip().startswith("$")]
+    mv   = _clean_num(dollar_lines[0]) if len(dollar_lines) >= 1 else None
+    sale = _clean_num(dollar_lines[2]) if len(dollar_lines) >= 3 else None
 
     # Release Date — required
     if date_out is None:
@@ -163,6 +167,7 @@ def parse_pdf(pdf_path: Path) -> Dict[str, Optional[str]]:
         "Sold": withheld if withheld is not None else None,
         "Issued": int(round(issued)) if issued is not None else None,
         "Price per share ($)": round(mv, 2) if mv is not None else None,
+        "Sale price per share ($)": round(sale, 2) if sale is not None else None,
         "Award Date": award_date_out,
         "Award Number": award_number,
     }

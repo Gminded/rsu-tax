@@ -339,6 +339,46 @@ class TestWithholdingSell:
         _, _, notes, _ = ccb.get_gains_and_holdings(events)
         assert "withholding" in notes[1].lower()
 
+    def _ws_events(self, ccb, mv_gbp, sale_gbp, units=200):
+        """Buy 800 @ mv plus a same-day WithholdingSell of `units` at `sale_gbp`."""
+        return pd.DataFrame([
+            {ccb.TYPE_LABEL: ccb.BUY_TYPE, ccb.DATE_LABEL: "2020-01-01",
+             ccb.DATE_DT: datetime(2020, 1, 1), ccb.GRANTED_LABEL: 800.0,
+             ccb.SOLD_LABEL: 0.0, ccb.ISSUED_LABEL: 800.0,
+             ccb.PRICE_PER_SHARE_GBP_LABEL: mv_gbp,
+             ccb.SALE_PRICE_PER_SHARE_GBP_LABEL: float("nan")},
+            {ccb.TYPE_LABEL: ccb.WITHHOLDING_SELL_TYPE, ccb.DATE_LABEL: "2020-01-01",
+             ccb.DATE_DT: datetime(2020, 1, 1), ccb.GRANTED_LABEL: 0.0,
+             ccb.SOLD_LABEL: float(units), ccb.ISSUED_LABEL: 0.0,
+             ccb.PRICE_PER_SHARE_GBP_LABEL: mv_gbp,
+             ccb.SALE_PRICE_PER_SHARE_GBP_LABEL: sale_gbp},
+        ])
+
+    def test_withholding_sell_taxable_when_sale_price_below_market_value(self, ccb):
+        """Sold to cover at a price below release-date market value → allowable loss."""
+        events = self._ws_events(ccb, mv_gbp=10.0, sale_gbp=9.5, units=200)
+        gains, _, notes, _ = ccb.get_gains_and_holdings(events)
+        assert gains[1] == pytest.approx(200 * (9.5 - 10.0))   # -100
+        assert "vs MV" in notes[1]
+
+    def test_withholding_sell_taxable_when_sale_price_above_market_value(self, ccb):
+        """Sold to cover at a price above release-date market value → chargeable gain."""
+        events = self._ws_events(ccb, mv_gbp=10.0, sale_gbp=10.25, units=200)
+        gains, _, _, _ = ccb.get_gains_and_holdings(events)
+        assert gains[1] == pytest.approx(200 * (10.25 - 10.0))   # +50
+
+    def test_withholding_sell_zero_gain_when_sale_price_equals_market_value(self, ccb):
+        events = self._ws_events(ccb, mv_gbp=10.0, sale_gbp=10.0, units=200)
+        gains, _, notes, _ = ccb.get_gains_and_holdings(events)
+        assert gains[1] == pytest.approx(0.0)
+        assert "vs MV" not in notes[1]
+
+    def test_withholding_sell_does_not_deplete_pool_even_with_sale_price(self, ccb):
+        events = self._ws_events(ccb, mv_gbp=10.0, sale_gbp=9.0, units=200)
+        _, holdings, _, _ = ccb.get_gains_and_holdings(events)
+        # Pool holds only the 800 issued shares; the 200 withheld never enter it.
+        assert holdings[1] == pytest.approx(800 * 10.0)
+
     def test_main_injects_withholding_sell_rows(self, ccb, tmp_path, capsys):
         """A release with Sold > 0 should produce a WithholdingSell row in the output."""
         xr = tmp_path / "xr.csv"
@@ -404,6 +444,32 @@ class TestTaxYearLabel:
 
     def test_century_boundary(self, ccb):
         assert self._label(ccb, 2099, 4, 6) == "2099/00"
+
+
+# ── parse_pdf sale-price extraction ───────────────────────────────────────────
+
+class TestParsePdfSalePrice:
+    """The third per-share dollar value is the Sale Price; it is present only for
+    'Shares Sold' releases (sold on the market), not 'Shares Traded' (net-settled)."""
+
+    REPO = __import__("pathlib").Path(__file__).parent.parent
+    SOLD_PDF   = REPO / "release-confirmations" / "2018-02-01-R1084-2020-06-01.pdf"
+    TRADED_PDF = REPO / "release-confirmations" / "2018-02-01-R1084-2018-11-15.pdf"
+
+    def test_shares_sold_release_has_distinct_sale_price(self, parse_pdf_mod):
+        if not self.SOLD_PDF.exists():
+            pytest.skip("sample PDF not present")
+        row = parse_pdf_mod.parse_pdf(self.SOLD_PDF)
+        assert row["Price per share ($)"] == pytest.approx(112.95)
+        assert row["Sale price per share ($)"] == pytest.approx(111.33)
+        assert row["Price per share ($)"] != row["Sale price per share ($)"]
+
+    def test_shares_traded_release_has_no_sale_price(self, parse_pdf_mod):
+        if not self.TRADED_PDF.exists():
+            pytest.skip("sample PDF not present")
+        row = parse_pdf_mod.parse_pdf(self.TRADED_PDF)
+        assert row["Price per share ($)"] == pytest.approx(44.53)
+        assert row["Sale price per share ($)"] is None
 
 
 # ── attach_rate ───────────────────────────────────────────────────────────────
@@ -604,6 +670,47 @@ class TestMainIntegration:
         sell = next(r for r in rows if r["Type"] == "Sell")
         assert float(sell["Gains / Losses (GBP)"]) == pytest.approx(50 * 12 - 50 * 14)
         assert "30-day" in sell["Matching Rule"]
+
+    def test_withholding_sale_price_difference_produces_taxable_gain(self, ccb, tmp_path, capsys):
+        """A 'Shares Sold' release whose sale price differs from market value is taxable."""
+        xr = self._write(tmp_path / "xr.csv",
+            "Country/Territories,Currency,Currency code,"
+            "Currency units per £1,Start Date,End Date\n"
+            "USA,Dollar,USD,1.0000,01/01/2020,31/12/2020\n"
+        )
+        rel = self._write(tmp_path / "rel.csv",
+            "Release Date,Granted,Sold,Issued,Price per share ($),Sale price per share ($)\n"
+            "2020-06-01,1000,200,800,10.00,9.50\n"
+        )
+        ccb.main(["prog", "-r", rel, "-x", xr])
+        out, err = capsys.readouterr()
+        rows = list(csv.DictReader(io.StringIO(out)))
+        ws = next(r for r in rows if r["Type"] == "WithholdingSell")
+        assert float(ws["Gains / Losses (GBP)"]) == pytest.approx(200 * (9.50 - 10.00))
+        assert ws["Sale price per share (GBP)"] == "9.5000"
+        # 1 taxable event (the withholding sell) in 2020/21
+        assert "2020/21" in err
+
+    def test_summary_includes_tax_years_without_taxable_events(self, ccb, tmp_path, capsys):
+        """Years between the first and last events appear even with zero disposals."""
+        xr = self._write(tmp_path / "xr.csv",
+            "Country/Territories,Currency,Currency code,"
+            "Currency units per £1,Start Date,End Date\n"
+            "USA,Dollar,USD,1.0000,01/01/2019,31/12/2023\n"
+        )
+        rel = self._write(tmp_path / "rel.csv",
+            "Release Date,Granted,Sold,Issued,Price per share ($)\n"
+            "2019-06-01,100,0,100,10.00\n"
+        )
+        sales = self._write(tmp_path / "sales.csv",
+            "Date,Shares,Price per share ($)\n"
+            "2022-09-01,50,15.00\n"
+        )
+        ccb.main(["prog", "-r", rel, "-x", xr, "-s", sales])
+        err = capsys.readouterr().err
+        # Span runs 2019/20 .. 2022/23; the middle years have no taxable events
+        for ty in ("2019/20", "2020/21", "2021/22", "2022/23"):
+            assert ty in err
 
     def test_output_columns_present(self, ccb, tmp_path, capsys):
         xr = self._write(tmp_path / "xr.csv",

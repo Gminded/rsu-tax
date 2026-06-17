@@ -29,6 +29,8 @@ END_DATE_LABEL            = "End Date"
 RELEASE_DATE_LABEL        = "Release Date"
 PRICE_PER_SHARE_USD_LABEL = "Price per share ($)"
 PRICE_PER_SHARE_GBP_LABEL = "Price per share (GBP)"
+SALE_PRICE_PER_SHARE_USD_LABEL = "Sale price per share ($)"
+SALE_PRICE_PER_SHARE_GBP_LABEL = "Sale price per share (GBP)"
 GBP_USD_LABEL             = "GBP/USD"
 HOLDINGS_GBP_LABEL        = "Holdings (GBP)"
 OWNED_SHARES_LABEL        = "Owned shares"
@@ -219,12 +221,27 @@ def get_gains_and_holdings(events: pd.DataFrame):
                 matching_notes.append("")
 
         elif typ == WITHHOLDING_SELL_TYPE:
-            # These shares were never in the pool; gain is zero by design
-            # (cost = proceeds = market value on release date under same-day rule).
-            gains.append(0.0)
+            # Shares the broker sold to cover income tax on the vest.  These were
+            # never in the Section 104 pool: under the same-day rule their cost
+            # basis is the acquisition cost (market value at release = price_gbp),
+            # and the proceeds are the broker's actual sale price.  When the
+            # shares were net-settled at market value (no separate sale price)
+            # the gain is zero.
+            units    = require_float(rec[SOLD_LABEL], SOLD_LABEL, rec[DATE_LABEL])
+            sale_gbp = rec.get(SALE_PRICE_PER_SHARE_GBP_LABEL)
+            if sale_gbp is None or (isinstance(sale_gbp, float) and math.isnan(sale_gbp)):
+                sale_gbp = price_gbp
+            gain = (sale_gbp - price_gbp) * units
+            gains.append(gain)
             pool_costs_out.append(pool_cost)
             pool_units_out.append(pool_units)
-            matching_notes.append("same-day rule (tax withholding)")
+            if abs(gain) > 1e-9:
+                matching_notes.append(
+                    f"same-day rule (tax withholding); sold {units:.0f} sh @ "
+                    f"£{sale_gbp:.4f} vs MV £{price_gbp:.4f}"
+                )
+            else:
+                matching_notes.append("same-day rule (tax withholding)")
 
         else:  # SELL_TYPE
             if i not in sell_info:
@@ -265,31 +282,56 @@ def get_gains_and_holdings(events: pd.DataFrame):
 
 
 # ---------- Tax-year summary ----------
-def _tax_year_label(dt: datetime) -> str:
+def _tax_year_start(dt: datetime) -> int:
+    """Calendar year in which the UK tax year containing `dt` begins (6 April)."""
     if dt.month > 4 or (dt.month == 4 and dt.day >= 6):
-        return f"{dt.year}/{(dt.year + 1) % 100:02d}"
-    return f"{dt.year - 1}/{dt.year % 100:02d}"
+        return dt.year
+    return dt.year - 1
+
+def _tax_year_label(dt: datetime) -> str:
+    y = _tax_year_start(dt)
+    return f"{y}/{(y + 1) % 100:02d}"
 
 def print_tax_year_summary(events: pd.DataFrame) -> None:
-    disposals = events[events[TYPE_LABEL].isin([SELL_TYPE, WITHHOLDING_SELL_TYPE])].copy()
-    if disposals.empty:
+    if events.empty:
         return
 
-    disposals["_ty"] = disposals[DATE_DT].apply(_tax_year_label)
-    summary = disposals.groupby("_ty")[GAINS_LABEL].agg(
+    # Taxable events are chargeable disposals:
+    #   * every genuine Sell, and
+    #   * a WithholdingSell only when the broker's sale price differed from the
+    #     market value at release, so it realised a (small) gain or loss.  A
+    #     WithholdingSell sold/net-settled at market value has gain = 0 and is
+    #     not a taxable event.
+    is_sell        = events[TYPE_LABEL] == SELL_TYPE
+    is_taxable_ws  = ((events[TYPE_LABEL] == WITHHOLDING_SELL_TYPE) &
+                      (events[GAINS_LABEL].abs() > 1e-9))
+    taxable = events[is_sell | is_taxable_ws].copy()
+
+    # Show every UK tax year spanned by the data (continuous, no gaps), so a year
+    # with no taxable events still appears as a zero row.
+    start = _tax_year_start(events[DATE_DT].min())
+    end   = _tax_year_start(events[DATE_DT].max())
+    all_years = [f"{y}/{(y + 1) % 100:02d}" for y in range(start, end + 1)]
+
+    taxable["_ty"] = taxable[DATE_DT].apply(_tax_year_label)
+    summary = taxable.groupby("_ty")[GAINS_LABEL].agg(
         total_gain="sum",
-        n_disposals="count",
+        n_events="count",
     )
 
     print("\n=== Capital Gains / Losses by UK Tax Year ===", file=sys.stderr)
-    print(f"  {'Tax year':<12}  {'Disposals':>10}  {'Net gain/loss (GBP)':>22}", file=sys.stderr)
-    print(f"  {'-'*12}  {'-'*10}  {'-'*22}", file=sys.stderr)
+    print(f"  {'Tax year':<12}  {'Taxable events':>14}  {'Net gain/loss (GBP)':>22}", file=sys.stderr)
+    print(f"  {'-'*12}  {'-'*14}  {'-'*22}", file=sys.stderr)
     grand_total = 0.0
-    for ty, row in sorted(summary.iterrows()):
-        gain = row["total_gain"]
+    for ty in all_years:
+        if ty in summary.index:
+            gain = summary.loc[ty, "total_gain"]
+            n    = int(summary.loc[ty, "n_events"])
+        else:
+            gain, n = 0.0, 0
         grand_total += gain
-        print(f"  {ty:<12}  {int(row['n_disposals']):>10}  £{gain:>21,.2f}", file=sys.stderr)
-    print(f"  {'TOTAL':<12}  {'':>10}  £{grand_total:>21,.2f}", file=sys.stderr)
+        print(f"  {ty:<12}  {n:>14}  £{gain:>21,.2f}", file=sys.stderr)
+    print(f"  {'TOTAL':<12}  {'':>14}  £{grand_total:>21,.2f}", file=sys.stderr)
     print("  (Annual exempt amount and prior-year losses not applied)", file=sys.stderr)
     print("", file=sys.stderr)
 
@@ -298,12 +340,14 @@ def print_tax_year_summary(events: pd.DataFrame) -> None:
 def print_events(events: pd.DataFrame) -> None:
     output_cols = [
         TYPE_LABEL, DATE_LABEL, GRANTED_LABEL, SOLD_LABEL, ISSUED_LABEL,
-        PRICE_PER_SHARE_USD_LABEL, GBP_USD_LABEL, PRICE_PER_SHARE_GBP_LABEL,
+        PRICE_PER_SHARE_USD_LABEL, SALE_PRICE_PER_SHARE_USD_LABEL,
+        GBP_USD_LABEL, PRICE_PER_SHARE_GBP_LABEL, SALE_PRICE_PER_SHARE_GBP_LABEL,
         HOLDINGS_GBP_LABEL, GAINS_LABEL, MATCHING_LABEL,
     ]
     out = events.copy()
-    for c in (PRICE_PER_SHARE_USD_LABEL, GBP_USD_LABEL,
-              PRICE_PER_SHARE_GBP_LABEL, GAINS_LABEL, HOLDINGS_GBP_LABEL):
+    for c in (PRICE_PER_SHARE_USD_LABEL, SALE_PRICE_PER_SHARE_USD_LABEL,
+              GBP_USD_LABEL, PRICE_PER_SHARE_GBP_LABEL, SALE_PRICE_PER_SHARE_GBP_LABEL,
+              GAINS_LABEL, HOLDINGS_GBP_LABEL):
         out[c] = out[c].apply(lambda x: f"{x:.4f}" if pd.notnull(x) else "")
     out.to_csv(sys.stdout, index=False, columns=output_cols, float_format="%.0f")
 
@@ -340,29 +384,41 @@ def main(argv):
     xr["Start_dt"] = xr[START_DATE_LABEL].apply(parse_date_dmy)
     xr["End_dt"]   = xr[END_DATE_LABEL].apply(parse_date_dmy)
 
+    # Sale price per share is optional: it is present only for releases where the
+    # broker sold the withheld shares on the market (rather than net-settling at
+    # market value).  Absent → withheld shares settled at market value, no gain.
+    if SALE_PRICE_PER_SHARE_USD_LABEL not in rel.columns:
+        rel[SALE_PRICE_PER_SHARE_USD_LABEL] = float("nan")
+
     rel[GBP_USD_LABEL] = attach_rate(rel[DATE_DT], xr)
     rel[TYPE_LABEL]    = BUY_TYPE
     rel = rel[[TYPE_LABEL, DATE_LABEL, DATE_DT,
                GRANTED_LABEL, SOLD_LABEL, ISSUED_LABEL,
-               PRICE_PER_SHARE_USD_LABEL, GBP_USD_LABEL]]
+               PRICE_PER_SHARE_USD_LABEL, SALE_PRICE_PER_SHARE_USD_LABEL, GBP_USD_LABEL]]
 
     # --- Withholding-sell rows ---
-    # When RSUs vest, the broker sells some shares to cover income tax on your behalf.
-    # These are CGT disposals (gain = 0 since cost = proceeds = market value on same day)
-    # and should be visible in the output for HMRC reporting purposes.
+    # When RSUs vest, the broker sells/withholds some shares to cover income tax
+    # on your behalf.  These are CGT disposals: cost basis is the market value at
+    # release (same-day rule), proceeds are the broker's sale price.  The gain is
+    # zero unless the shares were sold on the market at a price that differed from
+    # the release-date market value.  They are shown for HMRC reporting purposes.
     ws_rows = []
     for _, row in rel.iterrows():
         withheld = require_float(row[SOLD_LABEL], SOLD_LABEL, row[DATE_LABEL])
         if withheld > 0:
+            sale_usd = row[SALE_PRICE_PER_SHARE_USD_LABEL]
+            if sale_usd is None or (isinstance(sale_usd, float) and math.isnan(sale_usd)):
+                sale_usd = row[PRICE_PER_SHARE_USD_LABEL]  # net-settled at market value
             ws_rows.append({
-                TYPE_LABEL:                WITHHOLDING_SELL_TYPE,
-                DATE_LABEL:                row[DATE_LABEL],
-                DATE_DT:                   row[DATE_DT],
-                GRANTED_LABEL:             0.0,
-                SOLD_LABEL:                withheld,
-                ISSUED_LABEL:              0.0,
-                PRICE_PER_SHARE_USD_LABEL: row[PRICE_PER_SHARE_USD_LABEL],
-                GBP_USD_LABEL:             row[GBP_USD_LABEL],
+                TYPE_LABEL:                     WITHHOLDING_SELL_TYPE,
+                DATE_LABEL:                     row[DATE_LABEL],
+                DATE_DT:                        row[DATE_DT],
+                GRANTED_LABEL:                  0.0,
+                SOLD_LABEL:                     withheld,
+                ISSUED_LABEL:                   0.0,
+                PRICE_PER_SHARE_USD_LABEL:      row[PRICE_PER_SHARE_USD_LABEL],
+                SALE_PRICE_PER_SHARE_USD_LABEL: sale_usd,
+                GBP_USD_LABEL:                  row[GBP_USD_LABEL],
             })
 
     # --- Sales (optional) ---
@@ -397,6 +453,11 @@ def main(argv):
     # --- GBP prices ---
     events[PRICE_PER_SHARE_GBP_LABEL] = (
         events[PRICE_PER_SHARE_USD_LABEL] / events[GBP_USD_LABEL]
+    )
+    if SALE_PRICE_PER_SHARE_USD_LABEL not in events.columns:
+        events[SALE_PRICE_PER_SHARE_USD_LABEL] = float("nan")
+    events[SALE_PRICE_PER_SHARE_GBP_LABEL] = (
+        events[SALE_PRICE_PER_SHARE_USD_LABEL] / events[GBP_USD_LABEL]
     )
 
     # --- HMRC matching + pool calculation ---

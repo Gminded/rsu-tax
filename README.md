@@ -77,9 +77,10 @@ Merges multiple HMRC monthly exchange-rate CSVs into a single file containing on
   - Merges **Buy (releases)** and **Sell (sales)** into one timeline and sorts by date.
   - Prepends `Type` column: `Buy` or `Sell`.
   - Implements the full HMRC share-identification order: same-day rule → 30-day rule → Section 104 pool.
-  - Inserts `WithholdingSell` rows for shares sold by the broker to cover income tax on RSU vests (these are CGT disposals with zero gain and appear in the output for HMRC reporting purposes).
+  - Inserts `WithholdingSell` rows for shares the broker withheld to cover income tax on RSU vests. Their cost basis is the market value at release (same-day rule); the gain is zero when the shares were net-settled at market value (`Shares Traded`), but a `Shares Sold` release records a separate `Sale price per share` and the difference from market value is a (usually small) chargeable gain/loss.
   - Adds a `Matching Rule` column indicating which identification rule(s) applied to each disposal.
-  - Adds `Price per share (GBP)` as an output column for easier verification.
+  - Adds `Price per share (GBP)` and `Sale price per share (GBP)` as output columns for easier verification.
+  - The tax-year summary counts **taxable events** (genuine sells plus withholding sells whose sale price differed from market value) and lists every UK tax year in range, including those with no taxable events.
   - Prints a capital-gains summary by UK tax year to stderr after generating the CSV.
 - **Flexible sales headers:** auto-detects typical columns (date, shares, USD price). If your headers differ, adjust the detection list in the script.
 
