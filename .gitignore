@@ -2,6 +2,7 @@ env
 out
 *.swp
 release-confirmations/*
+sales/
 __pycache__
 .etrade_session.json
 

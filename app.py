@@ -8,7 +8,7 @@ import pandas as pd
 import streamlit as st
 
 # ── Module loading ──────────────────────────────────────────────────────────────
-_BIN = Path(__file__).parent / "bin"
+_BIN = Path(__file__).parent / "scripts"
 sys.path.insert(0, str(_BIN))
 
 from parse_pdf import parse_pdf      # noqa: E402
