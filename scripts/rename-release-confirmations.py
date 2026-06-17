@@ -26,7 +26,7 @@ Fields are read via parse_pdf from the local parse_pdf module.
 
 Options:
   --dry-run       Show what would be renamed without changing files
-  --overwrite     Allow overwriting if the destination file already exists
+  --overwrite     Overwrite the destination even if it has different content
 """
 
 import argparse
@@ -63,20 +63,6 @@ def build_target_name(meta: Dict[str, object]) -> str:
     release_dt = safe_part(meta.get("Release Date"), "unknown-releasedate")
     return f'{award_date}-{award_num}-{release_dt}.pdf'
 
-def unique_path(target: Path) -> Path:
-    """
-    If target exists, append a numeric suffix before the extension: name-2.pdf, name-3.pdf, ...
-    """
-    if not target.exists():
-        return target
-    stem, suffix = target.stem, target.suffix
-    i = 2
-    while True:
-        candidate = target.with_name(f"{stem}-{i}{suffix}")
-        if not candidate.exists():
-            return candidate
-        i += 1
-
 def rename_file(src: Path, dry_run: bool = False, overwrite: bool = False) -> Optional[Path]:
     if not src.exists():
         print(f"[WARN] Skipping (not found): {src}", file=sys.stderr)
@@ -94,15 +80,22 @@ def rename_file(src: Path, dry_run: bool = False, overwrite: bool = False) -> Op
     new_name = build_target_name(meta)
     dst = src.with_name(new_name)
 
-    if not overwrite and src != dst:
-        dst = unique_path(dst)
-
     if src == dst:
         print(f"No need to rename: {src.name}")
-    else:
-        action = "Would rename" if dry_run else "Renamed"
-        print(f'{action}: "{src.name}" -> "{dst.name}"')
+        return dst
 
+    if dst.exists() and not overwrite:
+        if src.read_bytes() == dst.read_bytes():
+            print(f"Already renamed (identical content): {src.name} -> {dst.name}")
+            return dst
+        print(
+            f"[ERROR] Cannot rename '{src.name}' -> '{dst.name}': "
+            f"destination already exists with different content",
+            file=sys.stderr,
+        )
+        return None
+
+    print(f'{"Would rename" if dry_run else "Renamed"}: "{src.name}" -> "{dst.name}"')
     if not dry_run:
         try:
             src.rename(dst)
@@ -116,7 +109,7 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="Rename release confirmation PDFs using parse_pdf metadata.")
     p.add_argument("files", nargs="+", help="PDF files to rename")
     p.add_argument("--dry-run", action="store_true", help="Show planned renames without changing files")
-    p.add_argument("--overwrite", action="store_true", help="Allow overwriting if destination exists")
+    p.add_argument("--overwrite", action="store_true", help="Overwrite destination even if it has different content")
     args = p.parse_args(argv)
 
     exit_code = 0

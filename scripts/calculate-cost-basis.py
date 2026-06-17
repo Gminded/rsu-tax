@@ -14,7 +14,7 @@
 # along with this program; if not, see
 # <https://www.gnu.org/licenses/>.
 
-import sys, argparse
+import sys, argparse, math
 import pandas as pd
 from datetime import datetime, timedelta
 
@@ -40,6 +40,12 @@ MATCHING_LABEL            = "Matching Rule"
 BUY_TYPE              = "Buy"
 SELL_TYPE             = "Sell"
 WITHHOLDING_SELL_TYPE = "WithholdingSell"
+
+# ---------- Field validation ----------
+def require_float(val, label: str, context: str) -> float:
+    if val is None or (isinstance(val, float) and math.isnan(val)) or str(val).strip() == "":
+        raise ValueError(f"[{context}] Required field '{label}' is missing or empty")
+    return float(val)
 
 # ---------- Date parsing ----------
 def parse_date_ymd(s: str) -> datetime:
@@ -123,8 +129,8 @@ def get_gains_and_holdings(events: pd.DataFrame):
             continue
 
         sell_date  = rec[DATE_DT]
-        sell_units = float(rec[SOLD_LABEL] or 0.0)
-        price_gbp  = float(rec[PRICE_PER_SHARE_GBP_LABEL] or 0.0)
+        sell_units = require_float(rec[SOLD_LABEL], SOLD_LABEL, rec[DATE_LABEL])
+        price_gbp  = require_float(rec[PRICE_PER_SHARE_GBP_LABEL], PRICE_PER_SHARE_GBP_LABEL, rec[DATE_LABEL])
         proceeds   = sell_units * price_gbp
 
         remaining     = sell_units
@@ -138,13 +144,13 @@ def get_gains_and_holdings(events: pd.DataFrame):
                 break
             if buy[TYPE_LABEL] != BUY_TYPE or buy[DATE_DT] != sell_date:
                 continue
-            avail   = float(buy[ISSUED_LABEL] or 0.0) - buy_consumed[j]
+            avail   = require_float(buy[ISSUED_LABEL], ISSUED_LABEL, buy[DATE_LABEL]) - buy_consumed[j]
             matched = min(remaining, avail)
             if matched <= 0:
                 continue
             buy_consumed[j] += matched
             remaining        -= matched
-            matched_cost     += matched * float(buy[PRICE_PER_SHARE_GBP_LABEL] or 0.0)
+            matched_cost     += matched * require_float(buy[PRICE_PER_SHARE_GBP_LABEL], PRICE_PER_SHARE_GBP_LABEL, buy[DATE_LABEL])
             same_day_matched += matched
 
         if same_day_matched > 0:
@@ -162,13 +168,13 @@ def get_gains_and_holdings(events: pd.DataFrame):
             for j, buy in future_buys:
                 if remaining <= 0:
                     break
-                avail   = float(buy[ISSUED_LABEL] or 0.0) - buy_consumed[j]
+                avail   = require_float(buy[ISSUED_LABEL], ISSUED_LABEL, buy[DATE_LABEL]) - buy_consumed[j]
                 matched = min(remaining, avail)
                 if matched <= 0:
                     continue
                 buy_consumed[j] += matched
                 remaining        -= matched
-                matched_cost     += matched * float(buy[PRICE_PER_SHARE_GBP_LABEL] or 0.0)
+                matched_cost     += matched * require_float(buy[PRICE_PER_SHARE_GBP_LABEL], PRICE_PER_SHARE_GBP_LABEL, buy[DATE_LABEL])
                 acq_date = buy[DATE_LABEL]
                 thirty_day_by_date[acq_date] = thirty_day_by_date.get(acq_date, 0.0) + matched
 
@@ -193,10 +199,10 @@ def get_gains_and_holdings(events: pd.DataFrame):
 
     for i, rec in enumerate(records):
         typ       = rec[TYPE_LABEL]
-        price_gbp = float(rec[PRICE_PER_SHARE_GBP_LABEL] or 0.0)
+        price_gbp = require_float(rec[PRICE_PER_SHARE_GBP_LABEL], PRICE_PER_SHARE_GBP_LABEL, rec[DATE_LABEL])
 
         if typ == BUY_TYPE:
-            issued     = float(rec[ISSUED_LABEL] or 0.0)
+            issued     = require_float(rec[ISSUED_LABEL], ISSUED_LABEL, rec[DATE_LABEL])
             into_pool  = issued - buy_consumed[i]
             if into_pool > 1e-9:
                 pool_units += into_pool
@@ -221,11 +227,15 @@ def get_gains_and_holdings(events: pd.DataFrame):
             matching_notes.append("same-day rule (tax withholding)")
 
         else:  # SELL_TYPE
-            info         = sell_info.get(i, {})
-            pool_to_draw = info.get("pool_units", float(rec[SOLD_LABEL] or 0.0))
-            pre_cost     = info.get("pre_pool_cost", 0.0)
-            proceeds     = info.get("proceeds", float(rec[SOLD_LABEL] or 0.0) * price_gbp)
-            notes        = list(info.get("notes", []))
+            if i not in sell_info:
+                raise ValueError(
+                    f"[{rec[DATE_LABEL]}] SELL record at index {i} was not pre-processed in pass 1"
+                )
+            info         = sell_info[i]
+            pool_to_draw = info["pool_units"]
+            pre_cost     = info["pre_pool_cost"]
+            proceeds     = info["proceeds"]
+            notes        = list(info["notes"])
 
             allowable = pre_cost
 
@@ -342,7 +352,7 @@ def main(argv):
     # and should be visible in the output for HMRC reporting purposes.
     ws_rows = []
     for _, row in rel.iterrows():
-        withheld = float(row[SOLD_LABEL] or 0.0)
+        withheld = require_float(row[SOLD_LABEL], SOLD_LABEL, row[DATE_LABEL])
         if withheld > 0:
             ws_rows.append({
                 TYPE_LABEL:                WITHHOLDING_SELL_TYPE,

@@ -20,7 +20,14 @@ def main(argv):
         path = Path(p)
         row = get_usd_row(path)
         if row is None:
-            sys.stderr.write(f"Error: no USD entry found in {path}")
+            sys.stderr.write(f"Error: no USD entry found in {path}\n")
+            err_code = 1
+            continue
+        if len(row) != len(fieldnames):
+            sys.stderr.write(
+                f"Error: USD row in {path} has {len(row)} fields, "
+                f"expected {len(fieldnames)} ({fieldnames})\n"
+            )
             err_code = 1
             continue
         row = dict(zip(fieldnames, row))

@@ -55,15 +55,15 @@ def _first_match(pattern, lines: List[str]) -> Optional[str]:
 
 def _clean_num(s: Optional[str]) -> Optional[float]:
     if not s: return None
+    original = s
     s = s.strip().replace("$", "").replace(",", "")
     neg = s.startswith("(") and s.endswith(")")
     s = s.strip("()")
     try:
         v = float(s)
-        return -v if neg else v
     except ValueError:
-        print("Error in _clean_num()", file=sys.stderr)
-        return None
+        raise ValueError(f"Cannot parse numeric value from {original!r}")
+    return -v if neg else v
 
 def _parse_mmddyyyy(s: str) -> Optional[str]:
     for fmt in ("%m-%d-%Y", "%m/%d/%Y"):
