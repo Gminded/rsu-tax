@@ -322,16 +322,13 @@ def print_tax_year_summary(events: pd.DataFrame) -> None:
     print("\n=== Capital Gains / Losses by UK Tax Year ===", file=sys.stderr)
     print(f"  {'Tax year':<12}  {'Taxable events':>14}  {'Net gain/loss (GBP)':>22}", file=sys.stderr)
     print(f"  {'-'*12}  {'-'*14}  {'-'*22}", file=sys.stderr)
-    grand_total = 0.0
     for ty in all_years:
         if ty in summary.index:
             gain = summary.loc[ty, "total_gain"]
             n    = int(summary.loc[ty, "n_events"])
         else:
             gain, n = 0.0, 0
-        grand_total += gain
         print(f"  {ty:<12}  {n:>14}  £{gain:>21,.2f}", file=sys.stderr)
-    print(f"  {'TOTAL':<12}  {'':>14}  £{grand_total:>21,.2f}", file=sys.stderr)
     print("  (Annual exempt amount and prior-year losses not applied)", file=sys.stderr)
     print("", file=sys.stderr)
 
