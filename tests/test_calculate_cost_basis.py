@@ -574,6 +574,54 @@ class TestLoadSales:
             ccb.load_sales(p)
 
 
+# ── HMRC HS284 (2026) official examples ──────────────────────────────────────
+
+class TestHMRCHS284Examples:
+    """
+    Tests derived from the worked examples in HMRC helpsheet HS284
+    (Shares and Capital Gains Tax, tax year 2025–2026).
+    """
+
+    def test_example1_four_purchases_form_single_pool(self, ccb, mk):
+        """
+        Example 1: Wilson & Strickland plc — four purchases across different years
+        all pool into a single Section 104 holding of 12,000 shares.
+        Costs below are illustrative; the example only establishes pool composition.
+        """
+        events = mk([
+            (ccb.BUY_TYPE, "1979-06-01", 2000, 1.00),
+            (ccb.BUY_TYPE, "1982-11-01", 2500, 2.00),
+            (ccb.BUY_TYPE, "1987-08-01", 2500, 3.00),
+            (ccb.BUY_TYPE, "2006-05-01", 5000, 4.00),
+        ])
+        _, holdings, _, _ = ccb.get_gains_and_holdings(events)
+        expected_pool = 2000 * 1.0 + 2500 * 2.0 + 2500 * 3.0 + 5000 * 4.0
+        assert holdings[3] == pytest.approx(expected_pool)
+
+    def test_example2_bed_and_breakfasting_partial_match(self, ccb, mk):
+        """
+        Example 2: Mr Schneider sells 4,000 shares on 30 Aug 2025 for £6,000 total
+        and buys 500 shares on 11 Sep 2025 for £850 total (£1.70/share).
+
+        HMRC shows the 30-day matched portion:
+          Proceeds  (500 / 4,000 × £6,000) = £750
+          Cost                               = £850
+          Loss                               = £100
+
+        Pool uses £1/share so the total gain across both portions is:
+          £6,000 − (£850 + 3,500 × £1.00) = £1,650
+        """
+        events = mk([
+            (ccb.BUY_TYPE,  "2020-01-01", 9500, 1.00),
+            (ccb.SELL_TYPE, "2025-08-30", 4000, 1.50),   # £6,000 total
+            (ccb.BUY_TYPE,  "2025-09-11",  500, 1.70),   # £850 total, 12 days later
+        ])
+        gains, _, notes, _ = ccb.get_gains_and_holdings(events)
+        assert gains[1] == pytest.approx(6000 - (500 * 1.70 + 3500 * 1.00))
+        assert "30-day" in notes[1]
+        assert "Section 104" in notes[1]
+
+
 # ── Full-pipeline integration ─────────────────────────────────────────────────
 
 class TestMainIntegration:
