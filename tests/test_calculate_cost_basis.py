@@ -729,8 +729,9 @@ class TestMainIntegration:
                     "Gains / Losses (GBP)", "Matching Rule"):
             assert col in header, f"Missing column: {col}"
 
-    def test_missing_exchange_rate_produces_blank_gbp_price(self, ccb, tmp_path, capsys):
-        """A release date outside all exchange-rate ranges has no GBP price."""
+    def test_missing_exchange_rate_raises(self, ccb, tmp_path):
+        """A release date outside all exchange-rate ranges has no GBP price, which
+        now fails loudly (require_float) instead of silently defaulting."""
         xr = self._write(tmp_path / "xr.csv",
             "Country/Territories,Currency,Currency code,"
             "Currency units per £1,Start Date,End Date\n"
@@ -740,8 +741,5 @@ class TestMainIntegration:
             "Release Date,Granted,Sold,Issued,Price per share ($)\n"
             "2020-06-01,100,0,100,10.00\n"    # June — outside the rate table
         )
-        ccb.main(["prog", "-r", rel, "-x", xr])
-        out = capsys.readouterr().out
-        rows = list(csv.DictReader(io.StringIO(out)))
-        # Price per share (GBP) should be blank/empty when rate is unavailable
-        assert rows[0]["Price per share (GBP)"] == ""
+        with pytest.raises(ValueError, match="Price per share \\(GBP\\)"):
+            ccb.main(["prog", "-r", rel, "-x", xr])
