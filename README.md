@@ -61,6 +61,14 @@ In the web GUI the same thing is done with the **Type** dropdown in the "Sales &
 ### Exchange Rates
 The monthly exchange rates from HMRC that cover the period from January 2018 to November 2025 (or a later month if I remember to update this project) are already included. You can get more from https://www.trade-tariff.service.gov.uk/exchange_rates, or run `download-rates.sh` to download them automatically. Note that there exist no "official" exchange rates as such. HMRC accepts other sources too, e.g. your own bank or the Bank of England. However you must use the same source consistently throughout your calculations.
 
+## Tests
+
+Activate the virtual environment and run pytest:
+```
+source env/bin/activate
+python -m pytest tests/ -v
+```
+
 ## Components
 
 ### 1) `parse-stock-releases.py`
