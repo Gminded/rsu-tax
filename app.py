@@ -145,97 +145,27 @@ def _colour_gain(val):
 
 
 def _run_calculation(releases_df, sales_df, exrates_df) -> pd.DataFrame:
-    """Replicate calculate-cost-basis main() using DataFrames already in memory."""
-    rel = releases_df.copy()
+    """Run the shared engine pipeline on DataFrames already in memory.
 
-    if "Release Date" in rel.columns:
-        rel[ccb.DATE_LABEL] = rel["Release Date"].astype(str).str.replace("/", "-")
-    elif ccb.DATE_LABEL in rel.columns:
-        rel[ccb.DATE_LABEL] = rel[ccb.DATE_LABEL].astype(str).str.replace("/", "-")
-    else:
-        raise ValueError("Releases table must have a 'Release Date' column.")
-
-    rel[ccb.DATE_DT] = rel[ccb.DATE_LABEL].apply(ccb.parse_date_ymd)
-
-    xr = exrates_df.copy()
-    xr["Start_dt"] = xr["Start Date"].apply(ccb.parse_date_dmy)
-    xr["End_dt"]   = xr["End Date"].apply(ccb.parse_date_dmy)
-
-    rel[ccb.GBP_USD_LABEL] = ccb.attach_rate(rel[ccb.DATE_DT], xr)
-    rel[ccb.TYPE_LABEL]    = ccb.BUY_TYPE
-
-    _ev_cols = [
-        ccb.TYPE_LABEL, ccb.DATE_LABEL, ccb.DATE_DT,
-        ccb.GRANTED_LABEL, ccb.SOLD_LABEL, ccb.ISSUED_LABEL,
-        ccb.PRICE_PER_SHARE_USD_LABEL, ccb.GBP_USD_LABEL,
-    ]
-    rel = rel[_ev_cols]
-
-    # WithholdingSell rows — broker selling shares to cover income-tax on vests
-    ws_rows = []
-    for _, row in rel.iterrows():
-        withheld = float(row[ccb.SOLD_LABEL] or 0.0)
-        if withheld > 0:
-            ws_rows.append({
-                ccb.TYPE_LABEL:                ccb.WITHHOLDING_SELL_TYPE,
-                ccb.DATE_LABEL:                row[ccb.DATE_LABEL],
-                ccb.DATE_DT:                   row[ccb.DATE_DT],
-                ccb.GRANTED_LABEL:             0.0,
-                ccb.SOLD_LABEL:                withheld,
-                ccb.ISSUED_LABEL:              0.0,
-                ccb.PRICE_PER_SHARE_USD_LABEL: row[ccb.PRICE_PER_SHARE_USD_LABEL],
-                ccb.GBP_USD_LABEL:             row[ccb.GBP_USD_LABEL],
-            })
-
-    events_parts = [rel]
-
+    Both the CLI (`calculate-cost-basis.py main`) and this GUI delegate to
+    `ccb.build_events`, so the two interfaces can never drift apart.
+    """
+    # Normalise the GUI sales table (Date / Shares / Price per share ($)) into the
+    # engine's sales shape, dropping blank or zero-share rows.
+    sales = None
     valid_sales = sales_df.dropna(how="all")
-    numeric_shares = pd.to_numeric(valid_sales.get("Shares", pd.Series(dtype=float)), errors="coerce")
+    numeric_shares = pd.to_numeric(
+        valid_sales.get("Shares", pd.Series(dtype=float)), errors="coerce"
+    )
     valid_sales = valid_sales[numeric_shares.fillna(0) > 0]
     if not valid_sales.empty:
-        s = pd.DataFrame({
-            ccb.DATE_LABEL:                valid_sales["Date"].astype(str).str.replace("/", "-"),
+        sales = pd.DataFrame({
+            ccb.DATE_LABEL:                valid_sales["Date"].astype(str),
             ccb.SOLD_LABEL:                pd.to_numeric(valid_sales["Shares"]),
             ccb.PRICE_PER_SHARE_USD_LABEL: pd.to_numeric(valid_sales["Price per share ($)"]),
         })
-        s[ccb.DATE_DT]       = s[ccb.DATE_LABEL].apply(ccb.parse_date_ymd)
-        s[ccb.GBP_USD_LABEL] = ccb.attach_rate(s[ccb.DATE_DT], xr)
-        s[ccb.GRANTED_LABEL] = 0.0
-        s[ccb.ISSUED_LABEL]  = 0.0
-        s[ccb.TYPE_LABEL]    = ccb.SELL_TYPE
-        s = s[_ev_cols]
-        events_parts.append(s)
 
-    if ws_rows:
-        events_parts.append(pd.DataFrame(ws_rows))
-
-    events = pd.concat(events_parts, ignore_index=True)
-    type_order = {ccb.BUY_TYPE: 0, ccb.WITHHOLDING_SELL_TYPE: 1, ccb.SELL_TYPE: 2}
-    events["_sort_type"] = events[ccb.TYPE_LABEL].map(type_order).fillna(9)
-    events = (
-        events
-        .sort_values([ccb.DATE_DT, "_sort_type"], kind="stable")
-        .drop(columns=["_sort_type"])
-        .reset_index(drop=True)
-    )
-
-    events[ccb.PRICE_PER_SHARE_GBP_LABEL] = (
-        events[ccb.PRICE_PER_SHARE_USD_LABEL] / events[ccb.GBP_USD_LABEL]
-    )
-
-    gains, holdings, matching_notes, owned = ccb.get_gains_and_holdings(events)
-    events[ccb.GAINS_LABEL]        = gains
-    events[ccb.HOLDINGS_GBP_LABEL] = holdings
-    events[ccb.OWNED_SHARES_LABEL] = owned
-    events[ccb.MATCHING_LABEL]     = matching_notes
-
-    # Section 104 weighted-average cost per share held at each point.
-    owned_series = pd.Series(owned, index=events.index)
-    events[ccb.AVG_COST_GBP_LABEL] = events[ccb.HOLDINGS_GBP_LABEL].where(
-        owned_series > 1e-9
-    ) / owned_series.where(owned_series > 1e-9)
-
-    return events
+    return ccb.build_events(releases_df, sales, exrates_df)
 
 
 # ════════════════════════════════════════════════════════════════════════════════

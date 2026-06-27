@@ -349,6 +349,158 @@ def print_events(events: pd.DataFrame) -> None:
     out.to_csv(sys.stdout, index=False, columns=output_cols, float_format="%.0f")
 
 
+# ---------- Event assembly (shared by CLI and GUI) ----------
+# Column set every event row carries before matching.  Buys, Sells and
+# WithholdingSells are all normalised to this shape so they can be concatenated.
+_EVENT_COLS = [
+    TYPE_LABEL, DATE_LABEL, DATE_DT,
+    GRANTED_LABEL, SOLD_LABEL, ISSUED_LABEL,
+    PRICE_PER_SHARE_USD_LABEL, SALE_PRICE_PER_SHARE_USD_LABEL, GBP_USD_LABEL,
+]
+
+
+def _normalise_releases(releases: pd.DataFrame) -> pd.DataFrame:
+    """Coerce a releases table (CLI CSV or GUI DataFrame) into Buy rows."""
+    rel = releases.copy()
+    if DATE_LABEL in rel.columns:
+        rel[DATE_LABEL] = rel[DATE_LABEL].astype(str).str.replace("/", "-")
+    elif RELEASE_DATE_LABEL in rel.columns:
+        rel[DATE_LABEL] = rel[RELEASE_DATE_LABEL].astype(str).str.replace("/", "-")
+    else:
+        raise ValueError("Releases must include a 'Date' or 'Release Date' column.")
+
+    for col in (GRANTED_LABEL, SOLD_LABEL, ISSUED_LABEL, PRICE_PER_SHARE_USD_LABEL):
+        if col not in rel.columns:
+            raise ValueError(f"Releases missing required column: {col}")
+
+    rel[DATE_DT] = rel[DATE_LABEL].apply(parse_date_ymd)
+
+    # Sale price per share is present only for releases where the broker sold the
+    # withheld shares on the market (rather than net-settling at market value).
+    if SALE_PRICE_PER_SHARE_USD_LABEL not in rel.columns:
+        rel[SALE_PRICE_PER_SHARE_USD_LABEL] = float("nan")
+
+    rel[TYPE_LABEL] = BUY_TYPE
+    return rel
+
+
+def _normalise_exrates(exrates: pd.DataFrame) -> pd.DataFrame:
+    """Ensure the exchange-rate table carries parsed Start_dt / End_dt columns."""
+    xr = exrates.copy()
+    if "Start_dt" not in xr.columns:
+        xr["Start_dt"] = xr[START_DATE_LABEL].apply(parse_date_dmy)
+    if "End_dt" not in xr.columns:
+        xr["End_dt"] = xr[END_DATE_LABEL].apply(parse_date_dmy)
+    return xr
+
+
+def _withholding_sell_rows(rel: pd.DataFrame) -> list[dict]:
+    """One WithholdingSell row per release with shares withheld to cover tax."""
+    ws_rows = []
+    for _, row in rel.iterrows():
+        withheld = require_float(row[SOLD_LABEL], SOLD_LABEL, row[DATE_LABEL])
+        if withheld <= 0:
+            continue
+        sale_usd = row[SALE_PRICE_PER_SHARE_USD_LABEL]
+        if sale_usd is None or (isinstance(sale_usd, float) and math.isnan(sale_usd)):
+            sale_usd = row[PRICE_PER_SHARE_USD_LABEL]  # net-settled at market value
+        ws_rows.append({
+            TYPE_LABEL:                     WITHHOLDING_SELL_TYPE,
+            DATE_LABEL:                     row[DATE_LABEL],
+            DATE_DT:                        row[DATE_DT],
+            GRANTED_LABEL:                  0.0,
+            SOLD_LABEL:                     withheld,
+            ISSUED_LABEL:                   0.0,
+            PRICE_PER_SHARE_USD_LABEL:      row[PRICE_PER_SHARE_USD_LABEL],
+            SALE_PRICE_PER_SHARE_USD_LABEL: sale_usd,
+            GBP_USD_LABEL:                  row[GBP_USD_LABEL],
+        })
+    return ws_rows
+
+
+def build_events(releases: pd.DataFrame,
+                 sales: "pd.DataFrame | None",
+                 exrates: pd.DataFrame) -> pd.DataFrame:
+    """
+    Assemble the full event timeline and run the HS284 matching, returning a
+    DataFrame with one row per Buy / Sell / WithholdingSell and every derived
+    column (GBP prices, gains, Section 104 holdings, owned shares, average cost
+    and matching notes).
+
+    This is the single source of truth shared by the CLI (`main`) and the
+    Streamlit GUI, so the two cannot drift apart.
+
+    `sales` is an already-normalised table with at least Date, Sold and
+    Price per share ($) columns; an optional `Type` column may mark rows as
+    `Buy` (a generic acquisition that enters the pool) — anything else is a Sell.
+    """
+    xr = _normalise_exrates(exrates)
+
+    rel = _normalise_releases(releases)
+    rel[GBP_USD_LABEL] = attach_rate(rel[DATE_DT], xr)
+    rel = rel[_EVENT_COLS]
+
+    ws_rows = _withholding_sell_rows(rel)
+
+    events_parts = [rel]
+
+    if sales is not None and not sales.empty:
+        s = sales.copy()
+        s[DATE_LABEL] = s[DATE_LABEL].astype(str).str.replace("/", "-")
+        s[DATE_DT]    = s[DATE_LABEL].apply(parse_date_ymd)
+        s[GBP_USD_LABEL] = attach_rate(s[DATE_DT], xr)
+        if TYPE_LABEL not in s.columns:
+            s[TYPE_LABEL] = SELL_TYPE
+        else:
+            s[TYPE_LABEL] = s[TYPE_LABEL].fillna(SELL_TYPE)
+        # A generic Buy acquisition (e.g. ESPP / open-market purchase) enters the
+        # pool as Issued shares at its own cost basis; a Sell issues nothing.
+        is_buy = s[TYPE_LABEL] == BUY_TYPE
+        s[GRANTED_LABEL] = s[SOLD_LABEL].where(is_buy, 0.0)
+        s[ISSUED_LABEL]  = s[SOLD_LABEL].where(is_buy, 0.0)
+        if SALE_PRICE_PER_SHARE_USD_LABEL not in s.columns:
+            s[SALE_PRICE_PER_SHARE_USD_LABEL] = float("nan")
+        s = s[_EVENT_COLS]
+        events_parts.append(s)
+
+    if ws_rows:
+        events_parts.append(pd.DataFrame(ws_rows))
+
+    events = pd.concat(events_parts, ignore_index=True)
+
+    # Sort: date first; within a date, Buys before WithholdingSells before Sells
+    # so same-day matching sees the acquisition before any disposal.
+    type_order = {BUY_TYPE: 0, WITHHOLDING_SELL_TYPE: 1, SELL_TYPE: 2}
+    events["_sort_type"] = events[TYPE_LABEL].map(type_order).fillna(9)
+    events = (events
+              .sort_values([DATE_DT, "_sort_type"], kind="stable")
+              .drop(columns=["_sort_type"])
+              .reset_index(drop=True))
+
+    # GBP prices
+    events[PRICE_PER_SHARE_GBP_LABEL] = (
+        events[PRICE_PER_SHARE_USD_LABEL] / events[GBP_USD_LABEL]
+    )
+    events[SALE_PRICE_PER_SHARE_GBP_LABEL] = (
+        events[SALE_PRICE_PER_SHARE_USD_LABEL] / events[GBP_USD_LABEL]
+    )
+
+    # HMRC matching + Section 104 pool
+    gains, holdings, matching_notes, owned = get_gains_and_holdings(events)
+    events[GAINS_LABEL]        = gains
+    events[HOLDINGS_GBP_LABEL] = holdings
+    events[OWNED_SHARES_LABEL] = owned
+    events[MATCHING_LABEL]     = matching_notes
+
+    # Section 104 weighted-average cost per share held at each point.
+    owned_series = pd.Series(owned, index=events.index)
+    events[AVG_COST_GBP_LABEL] = events[HOLDINGS_GBP_LABEL].where(
+        owned_series > 1e-9
+    ) / owned_series.where(owned_series > 1e-9)
+
+    return events
+
+
 # ---------- Main ----------
 def main(argv):
     p = argparse.ArgumentParser(description="Calculate combined cost basis with optional sales.")
@@ -359,109 +511,11 @@ def main(argv):
     p.add_argument("--sales",    "-s", help="Sales CSV (optional)")
     args = p.parse_args(argv[1:])
 
-    # --- Load releases ---
-    rel = pd.read_csv(args.releases)
+    rel   = pd.read_csv(args.releases)
+    xr    = pd.read_csv(args.exrates)
+    sales = load_sales(args.sales) if args.sales else None
 
-    if DATE_LABEL in rel.columns:
-        rel[DATE_LABEL] = rel[DATE_LABEL].astype(str).str.replace("/", "-")
-    elif RELEASE_DATE_LABEL in rel.columns:
-        rel[DATE_LABEL] = rel[RELEASE_DATE_LABEL].astype(str).str.replace("/", "-")
-    else:
-        raise ValueError("Releases CSV must include 'Date' or 'Release Date' column.")
-
-    required_rel = [GRANTED_LABEL, SOLD_LABEL, ISSUED_LABEL, PRICE_PER_SHARE_USD_LABEL]
-    for col in required_rel:
-        if col not in rel.columns:
-            raise ValueError(f"Releases CSV missing required column: {col}")
-
-    rel[DATE_DT] = rel[DATE_LABEL].apply(parse_date_ymd)
-
-    # --- Load exchange rates ---
-    xr = pd.read_csv(args.exrates)
-    xr["Start_dt"] = xr[START_DATE_LABEL].apply(parse_date_dmy)
-    xr["End_dt"]   = xr[END_DATE_LABEL].apply(parse_date_dmy)
-
-    # Sale price per share is optional: it is present only for releases where the
-    # broker sold the withheld shares on the market (rather than net-settling at
-    # market value).  Absent → withheld shares settled at market value, no gain.
-    if SALE_PRICE_PER_SHARE_USD_LABEL not in rel.columns:
-        rel[SALE_PRICE_PER_SHARE_USD_LABEL] = float("nan")
-
-    rel[GBP_USD_LABEL] = attach_rate(rel[DATE_DT], xr)
-    rel[TYPE_LABEL]    = BUY_TYPE
-    rel = rel[[TYPE_LABEL, DATE_LABEL, DATE_DT,
-               GRANTED_LABEL, SOLD_LABEL, ISSUED_LABEL,
-               PRICE_PER_SHARE_USD_LABEL, SALE_PRICE_PER_SHARE_USD_LABEL, GBP_USD_LABEL]]
-
-    # --- Withholding-sell rows ---
-    # When RSUs vest, the broker sells/withholds some shares to cover income tax
-    # on your behalf.  These are CGT disposals: cost basis is the market value at
-    # release (same-day rule), proceeds are the broker's sale price.  The gain is
-    # zero unless the shares were sold on the market at a price that differed from
-    # the release-date market value.  They are shown for HMRC reporting purposes.
-    ws_rows = []
-    for _, row in rel.iterrows():
-        withheld = require_float(row[SOLD_LABEL], SOLD_LABEL, row[DATE_LABEL])
-        if withheld > 0:
-            sale_usd = row[SALE_PRICE_PER_SHARE_USD_LABEL]
-            if sale_usd is None or (isinstance(sale_usd, float) and math.isnan(sale_usd)):
-                sale_usd = row[PRICE_PER_SHARE_USD_LABEL]  # net-settled at market value
-            ws_rows.append({
-                TYPE_LABEL:                     WITHHOLDING_SELL_TYPE,
-                DATE_LABEL:                     row[DATE_LABEL],
-                DATE_DT:                        row[DATE_DT],
-                GRANTED_LABEL:                  0.0,
-                SOLD_LABEL:                     withheld,
-                ISSUED_LABEL:                   0.0,
-                PRICE_PER_SHARE_USD_LABEL:      row[PRICE_PER_SHARE_USD_LABEL],
-                SALE_PRICE_PER_SHARE_USD_LABEL: sale_usd,
-                GBP_USD_LABEL:                  row[GBP_USD_LABEL],
-            })
-
-    # --- Sales (optional) ---
-    if args.sales:
-        s = load_sales(args.sales)
-        s[DATE_DT]      = s[DATE_LABEL].apply(parse_date_ymd)
-        s[GBP_USD_LABEL] = attach_rate(s[DATE_DT], xr)
-        s[GRANTED_LABEL] = 0.0
-        s[ISSUED_LABEL]  = 0.0
-        s[TYPE_LABEL]    = SELL_TYPE
-        s = s[[TYPE_LABEL, DATE_LABEL, DATE_DT,
-               GRANTED_LABEL, SOLD_LABEL, ISSUED_LABEL,
-               PRICE_PER_SHARE_USD_LABEL, GBP_USD_LABEL]]
-        events_parts = [rel, s]
-    else:
-        events_parts = [rel]
-
-    if ws_rows:
-        events_parts.append(pd.DataFrame(ws_rows))
-
-    # --- Combine & sort (stable sort preserves same-day order: Buy before Sell) ---
-    events = pd.concat(events_parts, ignore_index=True)
-    # Sort: date first; within same date, Buys before Sells/WithholdingSells so that
-    # same-day matching correctly sees the acquisition before any disposal.
-    type_order = {BUY_TYPE: 0, WITHHOLDING_SELL_TYPE: 1, SELL_TYPE: 2}
-    events["_sort_type"] = events[TYPE_LABEL].map(type_order).fillna(9)
-    events = (events
-              .sort_values([DATE_DT, "_sort_type"], kind="stable")
-              .drop(columns=["_sort_type"])
-              .reset_index(drop=True))
-
-    # --- GBP prices ---
-    events[PRICE_PER_SHARE_GBP_LABEL] = (
-        events[PRICE_PER_SHARE_USD_LABEL] / events[GBP_USD_LABEL]
-    )
-    if SALE_PRICE_PER_SHARE_USD_LABEL not in events.columns:
-        events[SALE_PRICE_PER_SHARE_USD_LABEL] = float("nan")
-    events[SALE_PRICE_PER_SHARE_GBP_LABEL] = (
-        events[SALE_PRICE_PER_SHARE_USD_LABEL] / events[GBP_USD_LABEL]
-    )
-
-    # --- HMRC matching + pool calculation ---
-    gains, holdings, matching_notes, _ = get_gains_and_holdings(events)
-    events[GAINS_LABEL]   = gains
-    events[HOLDINGS_GBP_LABEL] = holdings
-    events[MATCHING_LABEL]     = matching_notes
+    events = build_events(rel, sales, xr)
 
     print_events(events)
     print_tax_year_summary(events)

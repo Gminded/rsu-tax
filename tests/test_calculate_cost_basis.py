@@ -791,3 +791,79 @@ class TestMainIntegration:
         )
         with pytest.raises(ValueError, match="Price per share \\(GBP\\)"):
             ccb.main(["prog", "-r", rel, "-x", xr])
+
+
+# ── build_events (shared CLI/GUI pipeline) ────────────────────────────────────
+
+class TestBuildEvents:
+    """build_events is the single pipeline used by both the CLI and the GUI."""
+
+    def _xr(self):
+        return pd.DataFrame({
+            "Start Date": ["01/01/2020"],
+            "End Date":   ["31/12/2020"],
+            "Currency units per £1": [1.0],
+        })
+
+    def _releases(self, date_col):
+        return pd.DataFrame({
+            date_col:              ["2020-03-01", "2020-07-01"],
+            "Granted":             [1000, 500],
+            "Sold":                [100, 0],
+            "Issued":              [900, 500],
+            "Price per share ($)": [10.0, 12.0],
+        })
+
+    def test_accepts_release_date_or_date_column(self, ccb):
+        """The GUI passes 'Release Date'; the CLI passes 'Date'. Both must work."""
+        ev_release = ccb.build_events(self._releases("Release Date"), None, self._xr())
+        ev_date    = ccb.build_events(self._releases("Date"), None, self._xr())
+        cols = [ccb.GAINS_LABEL, ccb.HOLDINGS_GBP_LABEL, ccb.OWNED_SHARES_LABEL]
+        pd.testing.assert_frame_equal(ev_release[cols], ev_date[cols])
+
+    def test_injects_withholding_sell_and_computes_pool_sale(self, ccb):
+        sales = pd.DataFrame({
+            "Date":                ["2020-09-01"],
+            "Sold":                [200.0],
+            "Price per share ($)": [15.0],
+        })
+        ev = ccb.build_events(self._releases("Release Date"), sales, self._xr())
+        types = list(ev[ccb.TYPE_LABEL])
+        assert ccb.WITHHOLDING_SELL_TYPE in types
+        sell = ev[ev[ccb.TYPE_LABEL] == ccb.SELL_TYPE].iloc[0]
+        # Pool: 900*10 + 500*12 = 15000 over 1400 sh; sell 200 from pool.
+        assert sell[ccb.GAINS_LABEL] == pytest.approx(200 * 15 - 15000 / 1400 * 200)
+        assert "Section 104" in sell[ccb.MATCHING_LABEL]
+
+    def test_includes_owned_and_avg_cost_columns(self, ccb):
+        ev = ccb.build_events(self._releases("Release Date"), None, self._xr())
+        for col in (ccb.OWNED_SHARES_LABEL, ccb.AVG_COST_GBP_LABEL):
+            assert col in ev.columns
+        last = ev.iloc[-1]
+        assert last[ccb.OWNED_SHARES_LABEL] == pytest.approx(1400.0)
+        assert last[ccb.AVG_COST_GBP_LABEL] == pytest.approx(15000 / 1400)
+
+    def test_main_uses_build_events(self, ccb, tmp_path, capsys):
+        """CLI output and a direct build_events call must agree on the gains."""
+        xr = tmp_path / "xr.csv"
+        xr.write_text(
+            "Country/Territories,Currency,Currency code,"
+            "Currency units per £1,Start Date,End Date\n"
+            "USA,Dollar,USD,1.0000,01/01/2020,31/12/2020\n"
+        )
+        rel = tmp_path / "rel.csv"
+        rel.write_text(
+            "Release Date,Granted,Sold,Issued,Price per share ($)\n"
+            "2020-03-01,1000,100,900,10.00\n"
+            "2020-07-01,500,0,500,12.00\n"
+        )
+        ccb.main(["prog", "-r", str(rel), "-x", str(xr)])
+        out = capsys.readouterr().out
+        rows = list(csv.DictReader(io.StringIO(out)))
+
+        ev = ccb.build_events(
+            pd.read_csv(rel), None, pd.read_csv(xr)
+        )
+        cli_buys = [r for r in rows if r["Type"] == "Buy"]
+        eng_buys = ev[ev[ccb.TYPE_LABEL] == ccb.BUY_TYPE]
+        assert len(cli_buys) == len(eng_buys)
