@@ -79,6 +79,10 @@ def attach_rate(df_dates: pd.Series, exrates_df: pd.DataFrame) -> pd.Series:
 CANDIDATE_DATE   = ["date", "sale date", "transaction date"]
 CANDIDATE_SHARES = ["shares", "quantity", "units", "issued", "shares sold", "qty"]
 CANDIDATE_PRICE  = ["price per share ($)", "priceusd", "price", "sale price", "sale price ($)"]
+CANDIDATE_TYPE   = ["type", "transaction type", "record type", "buy/sell", "side", "action"]
+
+# Tokens that mark a row as an acquisition (anything else is treated as a Sell).
+_BUY_TOKENS = ("buy", "acqui", "purchase", "espp", "osps", "exercise", "vest", "reinvest")
 
 def _find_col(cols, candidates):
     lc = {c.lower(): c for c in cols}
@@ -91,23 +95,39 @@ def _find_col(cols, candidates):
             return c
     return None
 
+def _classify_type(val) -> str:
+    """Map a free-text transaction-type cell to BUY_TYPE or SELL_TYPE."""
+    if val is None or (isinstance(val, float) and math.isnan(val)):
+        return SELL_TYPE
+    text = str(val).strip().lower()
+    if any(tok in text for tok in _BUY_TOKENS):
+        return BUY_TYPE
+    return SELL_TYPE
+
 def load_sales(sales_csv: str) -> pd.DataFrame:
     s = pd.read_csv(sales_csv)
     cols = list(s.columns)
     date_col   = _find_col(cols, CANDIDATE_DATE)
     shares_col = _find_col(cols, CANDIDATE_SHARES)
     price_col  = _find_col(cols, CANDIDATE_PRICE)
+    type_col   = _find_col(cols, CANDIDATE_TYPE)
     if not date_col or not shares_col or not price_col:
         raise ValueError(
             f"sales.csv missing recognizable columns. "
             f"Found: {cols}. Need Date~{CANDIDATE_DATE}, "
             f"Shares~{CANDIDATE_SHARES}, Price~{CANDIDATE_PRICE}"
         )
-    return pd.DataFrame({
+    out = pd.DataFrame({
         DATE_LABEL:                s[date_col].astype(str).str.replace("/", "-"),
         SOLD_LABEL:                s[shares_col].astype(float),
         PRICE_PER_SHARE_USD_LABEL: s[price_col].astype(float),
     })
+    # An optional Type column lets the same file carry generic acquisitions
+    # (ESPP / open-market buys / option exercises) so they join the same
+    # Section 104 pool as RSU releases.  Absent → every row is a Sell.
+    if type_col:
+        out[TYPE_LABEL] = s[type_col].apply(_classify_type)
+    return out
 
 
 # ---------- HMRC share-identification rules ----------
@@ -463,10 +483,14 @@ def build_events(releases: pd.DataFrame,
         else:
             s[TYPE_LABEL] = s[TYPE_LABEL].fillna(SELL_TYPE)
         # A generic Buy acquisition (e.g. ESPP / open-market purchase) enters the
-        # pool as Issued shares at its own cost basis; a Sell issues nothing.
+        # pool as Issued shares at its own cost basis; a Sell issues nothing and
+        # disposes of the quantity.  The input carries the quantity in SOLD_LABEL
+        # for both, so route it to the right column per row type.
         is_buy = s[TYPE_LABEL] == BUY_TYPE
-        s[GRANTED_LABEL] = s[SOLD_LABEL].where(is_buy, 0.0)
-        s[ISSUED_LABEL]  = s[SOLD_LABEL].where(is_buy, 0.0)
+        qty = s[SOLD_LABEL]
+        s[GRANTED_LABEL] = qty.where(is_buy, 0.0)
+        s[ISSUED_LABEL]  = qty.where(is_buy, 0.0)
+        s[SOLD_LABEL]    = qty.where(~is_buy, 0.0)
         if SALE_PRICE_PER_SHARE_USD_LABEL not in s.columns:
             s[SALE_PRICE_PER_SHARE_USD_LABEL] = float("nan")
         s = s[_EVENT_COLS]

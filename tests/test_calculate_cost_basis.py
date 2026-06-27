@@ -573,6 +573,25 @@ class TestLoadSales:
         with pytest.raises(ValueError, match="missing recognizable columns"):
             ccb.load_sales(p)
 
+    def test_type_column_classifies_buy_and_sell(self, ccb, tmp_path):
+        p = self._csv(tmp_path,
+            "Date,Type,Shares,Price per share ($)\n"
+            "2023-01-15,Buy,100,25.50\n"
+            "2023-06-01,Sell,50,30.00\n"
+            "2023-07-01,ESPP purchase,10,12.00\n"
+        )
+        df = ccb.load_sales(p)
+        assert list(df[ccb.TYPE_LABEL]) == [ccb.BUY_TYPE, ccb.SELL_TYPE, ccb.BUY_TYPE]
+
+    def test_no_type_column_means_all_sells(self, ccb, tmp_path):
+        p = self._csv(tmp_path,
+            "Date,Shares,Price per share ($)\n"
+            "2023-01-15,100,25.50\n"
+        )
+        df = ccb.load_sales(p)
+        # No Type column at all → build_events treats every row as a Sell.
+        assert ccb.TYPE_LABEL not in df.columns
+
 
 # ── HMRC HS284 (2026) official examples ──────────────────────────────────────
 
@@ -842,6 +861,48 @@ class TestBuildEvents:
         last = ev.iloc[-1]
         assert last[ccb.OWNED_SHARES_LABEL] == pytest.approx(1400.0)
         assert last[ccb.AVG_COST_GBP_LABEL] == pytest.approx(15000 / 1400)
+
+    def test_generic_buy_acquisition_joins_the_pool(self, ccb):
+        """A Type=Buy transaction (e.g. ESPP) pools with RSU releases, changing
+        the Section 104 average and therefore the gain on a later sale."""
+        releases = pd.DataFrame({
+            "Release Date":        ["2020-01-01"],
+            "Granted":             [100], "Sold": [0], "Issued": [100],
+            "Price per share ($)": [10.0],
+        })
+        sales = pd.DataFrame({
+            "Date": ["2020-02-01", "2020-03-01"],
+            ccb.TYPE_LABEL: [ccb.BUY_TYPE, ccb.SELL_TYPE],
+            "Sold": [100.0, 100.0],
+            "Price per share ($)": [20.0, 30.0],
+        })
+        ev = ccb.build_events(releases, sales, self._xr())
+
+        # Two acquisitions in the pool: 100@£10 + 100@£20 = £3000 over 200 sh.
+        assert (ev[ccb.TYPE_LABEL] == ccb.BUY_TYPE).sum() == 2
+        sell = ev[ev[ccb.TYPE_LABEL] == ccb.SELL_TYPE].iloc[0]
+        # Sell 100 from the pool: allowable = 200 sh avg £15 × 100 = £1500.
+        assert sell[ccb.GAINS_LABEL] == pytest.approx(100 * 30 - 1500)
+        # The generic Buy is an acquisition, not a disposal — no withholding sell.
+        assert (ev[ccb.TYPE_LABEL] == ccb.WITHHOLDING_SELL_TYPE).sum() == 0
+
+    def test_generic_buy_same_day_match(self, ccb):
+        """A Buy and Sell on the same day match same-day, bypassing the pool."""
+        sales = pd.DataFrame({
+            "Date": ["2020-05-01", "2020-05-01"],
+            ccb.TYPE_LABEL: [ccb.BUY_TYPE, ccb.SELL_TYPE],
+            "Sold": [50.0, 50.0],
+            "Price per share ($)": [20.0, 21.0],
+        })
+        releases = pd.DataFrame({
+            "Release Date":        ["2020-01-01"],
+            "Granted":             [100], "Sold": [0], "Issued": [100],
+            "Price per share ($)": [10.0],
+        })
+        ev = ccb.build_events(releases, sales, self._xr())
+        sell = ev[ev[ccb.TYPE_LABEL] == ccb.SELL_TYPE].iloc[0]
+        assert sell[ccb.GAINS_LABEL] == pytest.approx(50 * 21 - 50 * 20)
+        assert "same-day" in sell[ccb.MATCHING_LABEL]
 
     def test_main_uses_build_events(self, ccb, tmp_path, capsys):
         """CLI output and a direct build_events call must agree on the gains."""

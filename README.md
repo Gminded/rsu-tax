@@ -33,7 +33,7 @@ Then open `http://localhost:8501` in your browser.
 The GUI has three input sections:
 
 - **RSU Releases** — drag-and-drop one or more e*trade release confirmation PDFs. Each file is parsed immediately and the results appear in an editable table so you can correct any parse errors.
-- **Sales** — an editable table for voluntary sell transactions (not tax-withholding). Pre-loaded from `sales/sales.csv` if it exists.
+- **Sales & other acquisitions** — an editable table for voluntary sell transactions (not tax-withholding) and for generic acquisitions (ESPP, open-market buys, option exercises) that should join the Section 104 pool. A **Type** dropdown marks each row as *Sell* or *Buy*. Pre-loaded from `sales/sales.csv` if it exists.
 - **Exchange Rates** — automatically loaded from the bundled HMRC monthly rate files. You can upload additional CSVs here if your releases fall outside the covered period.
 
 Click **Calculate Gains & Losses** to run the full HS284 calculation. The results show a capital gains summary by UK tax year and a complete event timeline, with a **Download CSV** button to export the output.
@@ -45,8 +45,18 @@ Execute `run.sh` to run the tools in sequence and go from a bunch of PDF files f
 ### Stock Release Confirmations
 These can be obtained from e*trade as PDF files. The easiest way is to run `download_etrade.py`, which logs in to E*Trade and downloads all release confirmation PDFs automatically. Alternatively, in their website go to the "At work" section and select "My Account" -> "Benefit History". Expand "Restricted Stock (RS)" and click on the "View Confirmation of Release" links to download the files. For convenience you can use short names for the files (e.g. single digits or characters), then use `rename-release-confirmations.py` to automatically give them sensible names.
 
-### Sales
+### Sales and other acquisitions
 The list of sales must be manually created. A sample file is provided in sales/sales.csv. Use the same format.
+
+The file can also carry **acquisitions other than RSU releases** — ESPP purchases, open-market buys, or option exercises — so they join the **same Section 104 pool** as your RSUs (HMRC pools all shares of the same class together, regardless of how they were acquired). Add an optional `Type` column and set it to `Buy` for an acquisition or `Sell` for a disposal; rows with no `Type` are treated as sells. For a `Buy` row the price is the per-share cost basis. For example:
+
+```
+Date,Type,Shares,Price per share ($)
+2024-03-15,Buy,40,98.50      # ESPP purchase into the pool
+2024-06-01,Sell,100,127.05   # disposal
+```
+
+In the web GUI the same thing is done with the **Type** dropdown in the "Sales & other acquisitions" table.
 
 ### Exchange Rates
 The monthly exchange rates from HMRC that cover the period from January 2018 to November 2025 (or a later month if I remember to update this project) are already included. You can get more from https://www.trade-tariff.service.gov.uk/exchange_rates, or run `download-rates.sh` to download them automatically. Note that there exist no "official" exchange rates as such. HMRC accepts other sources too, e.g. your own bank or the Bank of England. However you must use the same source consistently throughout your calculations.

@@ -35,7 +35,7 @@ _RELEASE_COLS = ["Release Date", "Granted", "Sold", "Issued", "Price per share (
 # vested. Two different grants can vest on the same date with identical share
 # counts and price, so we must NOT deduplicate on (Release Date, Granted) alone.
 _RELEASE_KEY  = ["Release Date", "Award Number"]
-_SALES_COLS   = ["Date", "Shares", "Price per share ($)"]
+_SALES_COLS   = ["Date", "Type", "Shares", "Price per share ($)"]
 _XR_FIELDS    = ["Country/Territories", "Currency", "Currency code",
                  "Currency units per £1", "Start Date", "End Date"]
 
@@ -55,12 +55,26 @@ if "parsed_pdf_keys" not in st.session_state:
 if "results" not in st.session_state:
     st.session_state.results = None
 
+def _ensure_type_col(df: pd.DataFrame) -> pd.DataFrame:
+    """Guarantee a 'Type' column (defaulting to Sell) for older sales files."""
+    if "Type" not in df.columns:
+        df = df.copy()
+        df["Type"] = ccb.SELL_TYPE
+    else:
+        df["Type"] = df["Type"].fillna(ccb.SELL_TYPE)
+    return df[[c for c in _SALES_COLS if c in df.columns]
+              + [c for c in df.columns if c not in _SALES_COLS]]
+
+
 if "sales_df" not in st.session_state:
     if _SALES_CSV.exists():
         raw = pd.read_csv(_SALES_CSV)
         numeric_shares = pd.to_numeric(raw.get("Shares", pd.Series(dtype=float)), errors="coerce")
         valid = raw[numeric_shares.fillna(0) > 0].reset_index(drop=True)
-        st.session_state.sales_df = valid if not valid.empty else pd.DataFrame(columns=_SALES_COLS)
+        st.session_state.sales_df = (
+            _ensure_type_col(valid) if not valid.empty
+            else pd.DataFrame(columns=_SALES_COLS)
+        )
     else:
         st.session_state.sales_df = pd.DataFrame(columns=_SALES_COLS)
 
@@ -164,6 +178,11 @@ def _run_calculation(releases_df, sales_df, exrates_df) -> pd.DataFrame:
             ccb.SOLD_LABEL:                pd.to_numeric(valid_sales["Shares"]),
             ccb.PRICE_PER_SHARE_USD_LABEL: pd.to_numeric(valid_sales["Price per share ($)"]),
         })
+        # Optional Type column marks generic acquisitions (Buy) vs disposals (Sell).
+        if "Type" in valid_sales.columns:
+            sales[ccb.TYPE_LABEL] = (
+                valid_sales["Type"].apply(ccb._classify_type).values
+            )
 
     return ccb.build_events(releases_df, sales, exrates_df)
 
@@ -301,10 +320,12 @@ with st.expander(
         st.info("Upload one or more PDF release confirmation files to get started.")
 
 
-with st.expander("Sales", expanded=False):
+with st.expander("Sales & other acquisitions", expanded=False):
     st.caption(
-        "Voluntary sell transactions (not tax-withholding). "
-        "One row per sale — date in YYYY-MM-DD, price in USD. "
+        "Transactions other than RSU releases. Set **Type** to *Sell* for a "
+        "disposal, or *Buy* for a generic acquisition (ESPP, open-market "
+        "purchase, option exercise) so it joins the same Section 104 pool. "
+        "One row per transaction — date in YYYY-MM-DD, price in USD. "
         f"Saved to and auto-loaded from `{_SALES_CSV.relative_to(_ROOT)}`."
     )
     edited_sales = st.data_editor(
@@ -315,8 +336,14 @@ with st.expander("Sales", expanded=False):
         column_config={
             "Date": st.column_config.TextColumn(
                 "Date",
-                help="Date of sale in YYYY-MM-DD format, e.g. 2024-06-01",
+                help="Transaction date in YYYY-MM-DD format, e.g. 2024-06-01",
                 default="YYYY-MM-DD",
+            ),
+            "Type": st.column_config.SelectboxColumn(
+                "Type",
+                help="Sell = disposal; Buy = generic acquisition into the pool",
+                options=[ccb.SELL_TYPE, ccb.BUY_TYPE],
+                default=ccb.SELL_TYPE,
             ),
             "Shares": st.column_config.NumberColumn(
                 "Shares",
