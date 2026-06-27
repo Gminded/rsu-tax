@@ -503,10 +503,10 @@ class TestAttachRate:
         result = ccb.attach_rate(pd.Series([datetime(2020, 1, 31)]), xr)
         assert result.iloc[0] == pytest.approx(1.3000)
 
-    def test_date_outside_all_ranges_returns_none(self, ccb):
+    def test_date_outside_all_ranges_raises_naming_the_date(self, ccb):
         xr = self._exrates(ccb)
-        result = ccb.attach_rate(pd.Series([datetime(2021, 6, 1)]), xr)
-        assert result.iloc[0] is None
+        with pytest.raises(ValueError, match="No exchange rate found for 2021-06-01"):
+            ccb.attach_rate(pd.Series([datetime(2021, 6, 1)]), xr)
 
     def test_date_in_second_range(self, ccb):
         xr = self._exrates(ccb)
@@ -778,8 +778,8 @@ class TestMainIntegration:
             assert col in header, f"Missing column: {col}"
 
     def test_missing_exchange_rate_raises(self, ccb, tmp_path):
-        """A release date outside all exchange-rate ranges has no GBP price, which
-        now fails loudly (require_float) instead of silently defaulting."""
+        """A release date outside all exchange-rate ranges fails loudly at rate
+        lookup, naming the offending date, instead of silently defaulting."""
         xr = self._write(tmp_path / "xr.csv",
             "Country/Territories,Currency,Currency code,"
             "Currency units per £1,Start Date,End Date\n"
@@ -789,7 +789,7 @@ class TestMainIntegration:
             "Release Date,Granted,Sold,Issued,Price per share ($)\n"
             "2020-06-01,100,0,100,10.00\n"    # June — outside the rate table
         )
-        with pytest.raises(ValueError, match="Price per share \\(GBP\\)"):
+        with pytest.raises(ValueError, match="No exchange rate found for 2020-06-01"):
             ccb.main(["prog", "-r", rel, "-x", xr])
 
 

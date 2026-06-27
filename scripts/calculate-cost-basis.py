@@ -59,11 +59,20 @@ def parse_date_dmy(s: str) -> datetime:
 
 # ---------- Exchange rate lookup (inclusive ranges) ----------
 def attach_rate(df_dates: pd.Series, exrates_df: pd.DataFrame) -> pd.Series:
+    """Look up the GBP→USD rate covering each date.
+
+    Fails loudly, naming the offending date, when no rate range covers it —
+    rather than returning None and producing a silent NaN gain downstream.
+    """
     def find_rate(d):
         for _, r in exrates_df.iterrows():
             if r["Start_dt"] <= d <= r["End_dt"]:
                 return r["Currency units per £1"]
-        return None
+        raise ValueError(
+            f"No exchange rate found for {d.date()}: the rate table does not "
+            f"cover this date. Add the HMRC monthly rate file for that period "
+            f"(or upload it in the Exchange Rates section)."
+        )
     return df_dates.apply(find_rate)
 
 # ---------- Sales CSV helpers ----------
