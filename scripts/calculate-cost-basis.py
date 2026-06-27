@@ -43,6 +43,30 @@ BUY_TYPE              = "Buy"
 SELL_TYPE             = "Sell"
 WITHHOLDING_SELL_TYPE = "WithholdingSell"
 
+# Human-readable labels for the two ways a vest can settle the tax due on it.
+# Both are carried internally as WITHHOLDING_SELL_TYPE — they differ only in how
+# the withheld shares were settled, which is recorded by the presence of a
+# distinct broker sale price (see _is_sell_to_cover).
+WITHHOLDING_LABEL   = "Withholding Sell"   # net-settled at market value
+SELL_TO_COVER_LABEL = "Sell to cover"      # withheld shares sold on the market
+
+
+def _is_sell_to_cover(row) -> bool:
+    """True when a WithholdingSell disposed of the withheld shares on the open
+    market (a distinct broker sale price was recorded) rather than net-settling
+    at market value."""
+    sale = row.get(SALE_PRICE_PER_SHARE_USD_LABEL)
+    return sale is not None and not (isinstance(sale, float) and math.isnan(sale))
+
+
+def event_type_label(row) -> str:
+    """Map an event row's machine Type to a human-readable label, distinguishing
+    a net-settled Withholding Sell from a Sell to cover.  Shared by the CLI and
+    GUI so the distinction is defined once and never re-derived per interface."""
+    if row[TYPE_LABEL] == WITHHOLDING_SELL_TYPE:
+        return SELL_TO_COVER_LABEL if _is_sell_to_cover(row) else WITHHOLDING_LABEL
+    return row[TYPE_LABEL]
+
 # FX provenance.  HMRC requires that USD→GBP conversions use a single, consistent
 # source throughout a return; this project defaults to HMRC's published monthly
 # rates.  The note is surfaced in the output so the filing is self-documenting.
@@ -492,9 +516,10 @@ def _withholding_sell_rows(rel: pd.DataFrame) -> list[dict]:
         withheld = require_float(row[SOLD_LABEL], SOLD_LABEL, row[DATE_LABEL])
         if withheld <= 0:
             continue
-        sale_usd = row[SALE_PRICE_PER_SHARE_USD_LABEL]
-        if sale_usd is None or (isinstance(sale_usd, float) and math.isnan(sale_usd)):
-            sale_usd = row[PRICE_PER_SHARE_USD_LABEL]  # net-settled at market value
+        # Leave the sale price absent (NaN) for net-settled releases rather than
+        # back-filling it with the market value.  The gain calculation already
+        # treats a missing sale price as a zero-gain net-settlement, and keeping
+        # it absent lets _is_sell_to_cover tell the two methods apart for display.
         ws_rows.append({
             TYPE_LABEL:                     WITHHOLDING_SELL_TYPE,
             DATE_LABEL:                     row[DATE_LABEL],
@@ -503,7 +528,7 @@ def _withholding_sell_rows(rel: pd.DataFrame) -> list[dict]:
             SOLD_LABEL:                     withheld,
             ISSUED_LABEL:                   0.0,
             PRICE_PER_SHARE_USD_LABEL:      row[PRICE_PER_SHARE_USD_LABEL],
-            SALE_PRICE_PER_SHARE_USD_LABEL: sale_usd,
+            SALE_PRICE_PER_SHARE_USD_LABEL: row[SALE_PRICE_PER_SHARE_USD_LABEL],
             GBP_USD_LABEL:                  row[GBP_USD_LABEL],
         })
     return ws_rows

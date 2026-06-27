@@ -502,18 +502,28 @@ if st.session_state.results is not None:
     # ── Full event timeline ─────────────────────────────────────────────────────
     st.subheader("Full Event Timeline")
 
+    TRANSFERRED_LABEL = "Transferred shares"
+
+    display = events.copy()
+    # Show the human-readable settlement method (Withholding Sell vs Sell to
+    # cover). The distinction is defined once in the engine, not re-derived here.
+    display[ccb.TYPE_LABEL] = events.apply(ccb.event_type_label, axis=1)
+    # Each event moves shares one way only: a Buy acquires Granted shares; a Sell
+    # or WithholdingSell disposes of Sold shares. Collapse the two mutually
+    # exclusive columns into one.
+    is_buy = events[ccb.TYPE_LABEL] == ccb.BUY_TYPE
+    display[TRANSFERRED_LABEL] = events[ccb.SOLD_LABEL].where(
+        ~is_buy, events[ccb.GRANTED_LABEL]
+    )
+
     output_cols = [
         ccb.TYPE_LABEL, ccb.DATE_LABEL,
-        ccb.GRANTED_LABEL, ccb.SOLD_LABEL, ccb.ISSUED_LABEL,
-        ccb.PRICE_PER_SHARE_USD_LABEL, ccb.GBP_USD_LABEL,
-        ccb.PRICE_PER_SHARE_GBP_LABEL, ccb.SALE_PRICE_PER_SHARE_GBP_LABEL,
-        ccb.OWNED_SHARES_LABEL, ccb.AVG_COST_GBP_LABEL, ccb.HOLDINGS_GBP_LABEL,
+        TRANSFERRED_LABEL, ccb.OWNED_SHARES_LABEL,
+        ccb.PRICE_PER_SHARE_USD_LABEL, ccb.PRICE_PER_SHARE_GBP_LABEL,
+        ccb.AVG_COST_GBP_LABEL, ccb.HOLDINGS_GBP_LABEL,
         ccb.GAINS_LABEL, ccb.MATCHING_LABEL,
     ]
-    display = events[output_cols].copy()
-    # Withheld shares already appear in the WithholdingSell row — blank them out
-    # on the Buy row so they don't look like a double disposal.
-    display.loc[display[ccb.TYPE_LABEL] == ccb.BUY_TYPE, ccb.SOLD_LABEL] = float("nan")
+    display = display[output_cols]
 
     st.dataframe(
         display.style
@@ -521,16 +531,12 @@ if st.session_state.results is not None:
         .format(
             {
                 ccb.PRICE_PER_SHARE_USD_LABEL: "${:.4f}",
-                ccb.GBP_USD_LABEL:             "{:.4f}",
-                ccb.PRICE_PER_SHARE_GBP_LABEL:      "£{:.4f}",
-                ccb.SALE_PRICE_PER_SHARE_GBP_LABEL: "£{:.4f}",
+                ccb.PRICE_PER_SHARE_GBP_LABEL: "£{:.4f}",
                 ccb.OWNED_SHARES_LABEL:        "{:,.0f}",
                 ccb.AVG_COST_GBP_LABEL:        "£{:.4f}",
                 ccb.HOLDINGS_GBP_LABEL:        "£{:,.2f}",
                 ccb.GAINS_LABEL:               "£{:,.2f}",
-                ccb.GRANTED_LABEL:             "{:.0f}",
-                ccb.SOLD_LABEL:                "{:.0f}",
-                ccb.ISSUED_LABEL:              "{:.0f}",
+                TRANSFERRED_LABEL:             "{:,.0f}",
             },
             na_rep="",
         ),
