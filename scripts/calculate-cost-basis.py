@@ -518,16 +518,21 @@ def build_events(releases: pd.DataFrame,
         events[SALE_PRICE_PER_SHARE_USD_LABEL] / events[GBP_USD_LABEL]
     )
 
-    # HMRC matching + Section 104 pool
+    # HMRC matching + Section 104 pool.  The matching runs at full floating-point
+    # precision; only the *reported* monetary figures are quantised to pennies
+    # (2 dp GBP).  Keeping the internal pool unrounded means rounding never
+    # accumulates from one disposal to the next.
     gains, holdings, matching_notes, owned = get_gains_and_holdings(events)
-    events[GAINS_LABEL]        = gains
-    events[HOLDINGS_GBP_LABEL] = holdings
+    holdings_series = pd.Series(holdings, index=events.index)
+    owned_series    = pd.Series(owned, index=events.index)
+
+    events[GAINS_LABEL]        = pd.Series(gains, index=events.index).round(2)
+    events[HOLDINGS_GBP_LABEL] = holdings_series.round(2)
     events[OWNED_SHARES_LABEL] = owned
     events[MATCHING_LABEL]     = matching_notes
 
-    # Section 104 weighted-average cost per share held at each point.
-    owned_series = pd.Series(owned, index=events.index)
-    events[AVG_COST_GBP_LABEL] = events[HOLDINGS_GBP_LABEL].where(
+    # Section 104 weighted-average cost per share, from the unrounded pool cost.
+    events[AVG_COST_GBP_LABEL] = holdings_series.where(
         owned_series > 1e-9
     ) / owned_series.where(owned_series > 1e-9)
 

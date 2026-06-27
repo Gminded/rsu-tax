@@ -851,8 +851,25 @@ class TestBuildEvents:
         assert ccb.WITHHOLDING_SELL_TYPE in types
         sell = ev[ev[ccb.TYPE_LABEL] == ccb.SELL_TYPE].iloc[0]
         # Pool: 900*10 + 500*12 = 15000 over 1400 sh; sell 200 from pool.
-        assert sell[ccb.GAINS_LABEL] == pytest.approx(200 * 15 - 15000 / 1400 * 200)
+        # Reported gains are quantised to pennies (£857.142857… → £857.14).
+        assert sell[ccb.GAINS_LABEL] == pytest.approx(round(200 * 15 - 15000 / 1400 * 200, 2))
         assert "Section 104" in sell[ccb.MATCHING_LABEL]
+
+    def test_gains_and_holdings_quantised_to_pennies(self, ccb):
+        """Reported gains and pool cost are rounded to 2 dp; avg cost keeps
+        full precision (computed from the unrounded pool)."""
+        sales = pd.DataFrame({
+            "Date":                ["2020-09-01"],
+            "Sold":                [200.0],
+            "Price per share ($)": [15.0],
+        })
+        ev = ccb.build_events(self._releases("Release Date"), sales, self._xr())
+        for col in (ccb.GAINS_LABEL, ccb.HOLDINGS_GBP_LABEL):
+            for v in ev[col].dropna():
+                assert round(v, 2) == v, f"{col} value {v!r} not quantised to pennies"
+        # Avg cost is a per-share figure and is NOT forced to pennies.
+        sell = ev[ev[ccb.TYPE_LABEL] == ccb.SELL_TYPE].iloc[0]
+        assert sell[ccb.AVG_COST_GBP_LABEL] == pytest.approx(15000 / 1400)
 
     def test_includes_owned_and_avg_cost_columns(self, ccb):
         ev = ccb.build_events(self._releases("Release Date"), None, self._xr())
