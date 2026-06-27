@@ -121,4 +121,4 @@ It provides a single function to be used in other scripts.
 - **How it works:** PDF text-box layout parsing via `pdfminer.six` with positional lookups next to labels (e.g., “Release Date”, “Award Shares”, “Award Date”, “Award Number”, etc.).
 
 ### References
-The relevant HMRC rules can be found at https://www.gov.uk/government/publications/shares-and-capital-gains-tax-hs284-self-assessment-helpsheet/hs284-shares-and-capital-gains-tax-2024.
+The relevant HMRC rules can be found at https://www.gov.uk/government/publications/shares-and-capital-gains-tax-hs284-self-assessment-helpsheet/hs284-shares-and-capital-gains-tax-2026.
