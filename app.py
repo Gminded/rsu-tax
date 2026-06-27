@@ -131,19 +131,13 @@ def _tax_year_summary(events: pd.DataFrame) -> pd.DataFrame:
     if disposals.empty:
         return pd.DataFrame(columns=["Tax year", "Disposals", "Net gain / loss (£)"])
     disposals["_ty"] = disposals[ccb.DATE_DT].apply(ccb._tax_year_label)
-    summary = (
+    return (
         disposals.groupby("_ty")[ccb.GAINS_LABEL]
         .agg(Disposals="count", **{"Net gain / loss (£)": "sum"})
         .reset_index()
         .rename(columns={"_ty": "Tax year"})
         .sort_values("Tax year")
     )
-    total = pd.DataFrame([{
-        "Tax year": "TOTAL",
-        "Disposals": int(summary["Disposals"].sum()),
-        "Net gain / loss (£)": summary["Net gain / loss (£)"].sum(),
-    }])
-    return pd.concat([summary, total], ignore_index=True)
 
 
 def _colour_gain(val):
