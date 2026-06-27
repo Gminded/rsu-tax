@@ -593,6 +593,81 @@ class TestLoadSales:
         assert ccb.TYPE_LABEL not in df.columns
 
 
+# ── Capital-loss claim deadlines ──────────────────────────────────────────────
+
+class TestCapitalLossClaims:
+    def test_loss_year_reported_with_deadline(self, ccb):
+        events = ccb.build_events(
+            pd.DataFrame({
+                "Release Date": ["2020-06-01"],
+                "Granted": [100], "Sold": [0], "Issued": [100],
+                "Price per share ($)": [10.0],
+            }),
+            pd.DataFrame({"Date": ["2020-09-01"], "Sold": [100.0],
+                          "Price per share ($)": [6.0]}),
+            pd.DataFrame({"Start Date": ["01/01/2020"], "End Date": ["31/12/2020"],
+                          "Currency units per £1": [1.0]}),
+        )
+        # today before the deadline → not passed
+        claims = ccb.capital_loss_claims(events, today=datetime(2024, 1, 1))
+        assert len(claims) == 1
+        c = claims[0]
+        assert c["tax_year"] == "2020/21"
+        assert c["net_loss"] == pytest.approx(-400.0)
+        # Tax year 2020/21 ends 5 Apr 2021; deadline 4 years later = 5 Apr 2025.
+        assert c["deadline"] == datetime(2025, 4, 5)
+        assert c["passed"] is False
+
+    def test_deadline_passed_flagged(self, ccb):
+        events = ccb.build_events(
+            pd.DataFrame({
+                "Release Date": ["2020-06-01"],
+                "Granted": [100], "Sold": [0], "Issued": [100],
+                "Price per share ($)": [10.0],
+            }),
+            pd.DataFrame({"Date": ["2020-09-01"], "Sold": [100.0],
+                          "Price per share ($)": [6.0]}),
+            pd.DataFrame({"Start Date": ["01/01/2020"], "End Date": ["31/12/2020"],
+                          "Currency units per £1": [1.0]}),
+        )
+        claims = ccb.capital_loss_claims(events, today=datetime(2025, 4, 6))
+        assert claims[0]["passed"] is True
+
+    def test_no_claims_when_year_is_a_net_gain(self, ccb):
+        events = ccb.build_events(
+            pd.DataFrame({
+                "Release Date": ["2020-06-01"],
+                "Granted": [100], "Sold": [0], "Issued": [100],
+                "Price per share ($)": [10.0],
+            }),
+            pd.DataFrame({"Date": ["2020-09-01"], "Sold": [100.0],
+                          "Price per share ($)": [20.0]}),   # gain, not loss
+            pd.DataFrame({"Start Date": ["01/01/2020"], "End Date": ["31/12/2020"],
+                          "Currency units per £1": [1.0]}),
+        )
+        assert ccb.capital_loss_claims(events, today=datetime(2024, 1, 1)) == []
+
+    def test_cli_summary_mentions_loss_deadline(self, ccb, tmp_path, capsys):
+        xr = tmp_path / "xr.csv"
+        xr.write_text(
+            "Country/Territories,Currency,Currency code,"
+            "Currency units per £1,Start Date,End Date\n"
+            "USA,Dollar,USD,1.0000,01/01/2020,31/12/2020\n"
+        )
+        rel = tmp_path / "rel.csv"
+        rel.write_text(
+            "Release Date,Granted,Sold,Issued,Price per share ($)\n"
+            "2020-06-01,100,0,100,10.00\n"
+        )
+        sales = tmp_path / "sales.csv"
+        sales.write_text("Date,Shares,Price per share ($)\n2020-09-01,100,6.00\n")
+        ccb.main(["prog", "-r", str(rel), "-x", str(xr), "-s", str(sales)])
+        err = capsys.readouterr().err
+        assert "Capital losses" in err
+        assert "2020/21" in err
+        assert "05 Apr 2025" in err
+
+
 # ── HMRC HS284 (2026) official examples ──────────────────────────────────────
 
 class TestHMRCHS284Examples:

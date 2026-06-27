@@ -329,6 +329,50 @@ def _tax_year_label(dt: datetime) -> str:
     y = _tax_year_start(dt)
     return f"{y}/{(y + 1) % 100:02d}"
 
+
+def _taxable_disposals(events: pd.DataFrame) -> pd.DataFrame:
+    """Chargeable disposals: every Sell plus any WithholdingSell with a gain/loss."""
+    is_sell       = events[TYPE_LABEL] == SELL_TYPE
+    is_taxable_ws = ((events[TYPE_LABEL] == WITHHOLDING_SELL_TYPE) &
+                     (events[GAINS_LABEL].abs() > 1e-9))
+    return events[is_sell | is_taxable_ws].copy()
+
+
+def capital_loss_claims(events: pd.DataFrame, today: datetime = None) -> list[dict]:
+    """
+    For each UK tax year with a net allowable loss, return the HMRC notification
+    deadline and whether it has passed.
+
+    A capital loss must be notified to HMRC within four years of the end of the
+    tax year in which it arose (TMA 1970 s.43).  The tax year 20XX/YY ends on
+    5 April 20YY, so the deadline is 5 April four years later — i.e. 5 April of
+    (start year + 5).
+    """
+    if events.empty:
+        return []
+    if today is None:
+        today = datetime.today()
+
+    taxable = _taxable_disposals(events)
+    if taxable.empty:
+        return []
+
+    taxable["_tystart"] = taxable[DATE_DT].apply(_tax_year_start)
+    net_by_year = taxable.groupby("_tystart")[GAINS_LABEL].sum()
+
+    claims = []
+    for start_year, net in net_by_year.items():
+        if net < -1e-9:  # net loss for the year
+            start_year = int(start_year)
+            deadline = datetime(start_year + 5, 4, 5)
+            claims.append({
+                "tax_year": f"{start_year}/{(start_year + 1) % 100:02d}",
+                "net_loss": float(net),               # negative
+                "deadline": deadline,
+                "passed":   today > deadline,
+            })
+    return claims
+
 def print_tax_year_summary(events: pd.DataFrame) -> None:
     if events.empty:
         return
@@ -339,10 +383,7 @@ def print_tax_year_summary(events: pd.DataFrame) -> None:
     #     market value at release, so it realised a (small) gain or loss.  A
     #     WithholdingSell sold/net-settled at market value has gain = 0 and is
     #     not a taxable event.
-    is_sell        = events[TYPE_LABEL] == SELL_TYPE
-    is_taxable_ws  = ((events[TYPE_LABEL] == WITHHOLDING_SELL_TYPE) &
-                      (events[GAINS_LABEL].abs() > 1e-9))
-    taxable = events[is_sell | is_taxable_ws].copy()
+    taxable = _taxable_disposals(events)
 
     # Show every UK tax year spanned by the data (continuous, no gaps), so a year
     # with no taxable events still appears as a zero row.
@@ -368,6 +409,18 @@ def print_tax_year_summary(events: pd.DataFrame) -> None:
         print(f"  {ty:<12}  {n:>14}  £{gain:>21,.2f}", file=sys.stderr)
     print("  (Annual exempt amount and prior-year losses not applied)", file=sys.stderr)
     print(f"  {FX_PROVENANCE_NOTE}", file=sys.stderr)
+
+    claims = capital_loss_claims(events)
+    if claims:
+        print("\n  --- Capital losses: notify HMRC within 4 years to use them ---",
+              file=sys.stderr)
+        for c in claims:
+            if c["passed"]:
+                status = f"DEADLINE PASSED ({c['deadline']:%d %b %Y})"
+            else:
+                status = f"claim by {c['deadline']:%d %b %Y}"
+            print(f"  {c['tax_year']:<12}  loss £{-c['net_loss']:>14,.2f}  {status}",
+                  file=sys.stderr)
     print("", file=sys.stderr)
 
 

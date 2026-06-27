@@ -479,6 +479,23 @@ if st.session_state.results is not None:
         hide_index=True,
     )
 
+    # ── Capital-loss claim deadlines ─────────────────────────────────────────────
+    claims = ccb.capital_loss_claims(events)
+    if claims:
+        st.markdown("**Capital losses — notify HMRC within 4 years to use them**")
+        for c in claims:
+            loss = -c["net_loss"]
+            when = c["deadline"].strftime("%d %b %Y")
+            if c["passed"]:
+                st.error(
+                    f"{c['tax_year']}: loss of £{loss:,.2f} — claim deadline "
+                    f"{when} has **passed**; this loss can no longer be claimed."
+                )
+            else:
+                st.warning(
+                    f"{c['tax_year']}: loss of £{loss:,.2f} — notify HMRC by **{when}**."
+                )
+
     # ── Full event timeline ─────────────────────────────────────────────────────
     st.subheader("Full Event Timeline")
 
