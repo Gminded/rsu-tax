@@ -16,6 +16,7 @@
 
 import re
 import sys
+import warnings
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, List
@@ -58,7 +59,11 @@ def _clean_num(s: Optional[str]) -> Optional[float]:
     original = s
     s = s.strip().replace("$", "").replace(",", "")
     neg = s.startswith("(") and s.endswith(")")
-    s = s.strip("()")
+    s = s.strip("()").strip()
+    # An empty or whitespace-only cell is "absent", not malformed: return None so
+    # the caller can raise a clear, field-specific error if the value is required.
+    if s == "":
+        return None
     try:
         v = float(s)
     except ValueError:
@@ -108,6 +113,20 @@ def parse_pdf(pdf_path: Path) -> Dict[str, Optional[str]]:
         raise ValueError(
             "Could not extract 'Market Value Per Share' from PDF. "
             "Expected a '$...' value next to a 'Market Value Per Share' label."
+        )
+
+    # Sanity check (warning, not error): the broker's sale price for withheld
+    # shares is realised on the release date and should be close to the
+    # release-date market value.  A figure far outside that band usually means a
+    # mis-parsed column rather than a genuine price move, so warn and let the
+    # caller decide — we do NOT fail, because intraday moves can legitimately be
+    # large.
+    if sale is not None and mv > 0 and not (0.5 * mv <= sale <= 2.0 * mv):
+        warnings.warn(
+            f"Sale price per share (${sale:.2f}) differs markedly from market "
+            f"value per share (${mv:.2f}) in {pdf_path.name}; verify the PDF "
+            f"parsed correctly.",
+            stacklevel=2,
         )
 
     # Stock distribution: Award Shares / (Shares Traded|Sold) / Shares Issued

@@ -6,6 +6,7 @@ e*trade fixture files).  Instead we test every helper function in isolation
 and verify that parse_pdf() raises loud, descriptive errors for all mandatory
 fields that are absent or inconsistent.
 """
+import warnings
 from pathlib import Path
 from unittest.mock import patch
 
@@ -42,8 +43,10 @@ class TestCleanNum:
     def test_whitespace_only_returns_none(self, parse_pdf_mod):
         assert parse_pdf_mod._clean_num("   ") is None
 
-    def test_non_numeric_string_returns_none(self, parse_pdf_mod):
-        assert parse_pdf_mod._clean_num("not_a_number") is None
+    def test_non_numeric_string_raises(self, parse_pdf_mod):
+        """A genuinely malformed value fails loudly rather than defaulting."""
+        with pytest.raises(ValueError, match="Cannot parse numeric value"):
+            parse_pdf_mod._clean_num("not_a_number")
 
     def test_leading_trailing_whitespace_tolerated(self, parse_pdf_mod):
         assert parse_pdf_mod._clean_num("  $42.00  ") == pytest.approx(42.0)
@@ -267,6 +270,48 @@ class TestParsePdfErrors:
         assert result["Sold"] == 200
         assert result["Issued"] == 800
         assert result["Price per share ($)"] == pytest.approx(100.00)
+
+
+# ── Price-block sanity check (warning, not error) ─────────────────────────────
+
+class TestPriceSanityWarning:
+    def _patch(self, parse_pdf_mod, boxes):
+        return patch.object(parse_pdf_mod, "_collect_boxes", return_value=boxes)
+
+    def test_sale_price_far_from_market_value_warns(self, parse_pdf_mod):
+        """Sale price an order of magnitude off MV → likely a mis-parse → warn."""
+        boxes = (
+            _lv_boxes("Release Date", "03/15/2024", y=100)
+            # dollar lines: [0]=MV, [1]=award price, [2]=sale price
+            + _lv_boxes("Market Value Per Share", "$100.00\n$0.00\n$1000.00", y=130)
+            + _lv_boxes("Award Shares", "1000\n(200)\n800", y=160)
+        )
+        with self._patch(parse_pdf_mod, boxes):
+            with pytest.warns(UserWarning, match="differs markedly"):
+                result = parse_pdf_mod.parse_pdf(Path("dummy.pdf"))
+        # The value is still returned — the warning does not abort the parse.
+        assert result["Sale price per share ($)"] == pytest.approx(1000.00)
+
+    def test_sale_price_close_to_market_value_no_warning(self, parse_pdf_mod):
+        """A normal intraday move stays within band → no warning."""
+        boxes = (
+            _lv_boxes("Release Date", "03/15/2024", y=100)
+            + _lv_boxes("Market Value Per Share", "$100.00\n$0.00\n$105.00", y=130)
+            + _lv_boxes("Award Shares", "1000\n(200)\n800", y=160)
+        )
+        with self._patch(parse_pdf_mod, boxes):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")  # any warning becomes an error
+                result = parse_pdf_mod.parse_pdf(Path("dummy.pdf"))
+        assert result["Sale price per share ($)"] == pytest.approx(105.00)
+
+    def test_no_sale_price_no_warning(self, parse_pdf_mod):
+        """Net-settled release (no sale price line) never warns."""
+        with self._patch(parse_pdf_mod, _full_boxes()):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                result = parse_pdf_mod.parse_pdf(Path("dummy.pdf"))
+        assert result["Sale price per share ($)"] is None
 
 
 # ── parse-stock-releases error accumulation ───────────────────────────────────
