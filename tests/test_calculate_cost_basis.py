@@ -705,6 +705,9 @@ class TestMainIntegration:
         assert "2019/20" in err
         assert "2020/21" in err
 
+        # FX provenance is stated in the output so the filing is self-documenting.
+        assert "HMRC published monthly rates" in err
+
     def test_30_day_rule_applied_in_pipeline(self, ccb, tmp_path, capsys):
         """
         Sell from pool; then a release occurs within 30 days → 30-day rule must apply.

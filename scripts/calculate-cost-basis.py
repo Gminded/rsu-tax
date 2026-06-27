@@ -43,6 +43,14 @@ BUY_TYPE              = "Buy"
 SELL_TYPE             = "Sell"
 WITHHOLDING_SELL_TYPE = "WithholdingSell"
 
+# FX provenance.  HMRC requires that USD→GBP conversions use a single, consistent
+# source throughout a return; this project defaults to HMRC's published monthly
+# rates.  The note is surfaced in the output so the filing is self-documenting.
+FX_PROVENANCE_NOTE = (
+    "Exchange rates: HMRC published monthly rates (USD→GBP). "
+    "HMRC requires one consistent source across the whole return."
+)
+
 # ---------- Field validation ----------
 def require_float(val, label: str, context: str) -> float:
     if val is None or (isinstance(val, float) and math.isnan(val)) or str(val).strip() == "":
@@ -359,6 +367,7 @@ def print_tax_year_summary(events: pd.DataFrame) -> None:
             gain, n = 0.0, 0
         print(f"  {ty:<12}  {n:>14}  £{gain:>21,.2f}", file=sys.stderr)
     print("  (Annual exempt amount and prior-year losses not applied)", file=sys.stderr)
+    print(f"  {FX_PROVENANCE_NOTE}", file=sys.stderr)
     print("", file=sys.stderr)
 
 

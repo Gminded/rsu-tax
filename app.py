@@ -465,7 +465,10 @@ if st.session_state.results is not None:
 
     # ── Tax year summary ────────────────────────────────────────────────────────
     st.subheader("Capital Gains by UK Tax Year")
-    st.caption("Annual exempt amount and prior-year losses not applied.")
+    st.caption(
+        "Annual exempt amount and prior-year losses not applied. "
+        f"{ccb.FX_PROVENANCE_NOTE}"
+    )
 
     ty_df = _tax_year_summary(events)
     st.dataframe(
