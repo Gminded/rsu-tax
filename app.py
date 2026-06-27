@@ -30,7 +30,7 @@ _EXRATES_DIR = _ROOT / "monthly-exchange-rates-by-hmrc"
 _SALES_CSV   = _ROOT / "sales" / "sales.csv"
 
 _RELEASE_COLS = ["Release Date", "Granted", "Sold", "Issued", "Price per share ($)",
-                 "Award Date", "Award Number"]
+                 "Sale price per share ($)", "Award Date", "Award Number"]
 # A release is uniquely identified by its grant (Award Number) and the date it
 # vested. Two different grants can vest on the same date with identical share
 # counts and price, so we must NOT deduplicate on (Release Date, Granted) alone.
@@ -127,9 +127,7 @@ def _merge_releases(new_rows: list[dict]) -> int:
 
 
 def _tax_year_summary(events: pd.DataFrame) -> pd.DataFrame:
-    disposals = events[
-        events[ccb.TYPE_LABEL].isin([ccb.SELL_TYPE, ccb.WITHHOLDING_SELL_TYPE])
-    ].copy()
+    disposals = ccb._taxable_disposals(events).copy()
     if disposals.empty:
         return pd.DataFrame(columns=["Tax year", "Disposals", "Net gain / loss (£)"])
     disposals["_ty"] = disposals[ccb.DATE_DT].apply(ccb._tax_year_label)
@@ -298,6 +296,11 @@ with st.expander(
                 "Price per share ($)": st.column_config.NumberColumn(
                     "Price / share ($)", format="$%.4f", step=0.0001, min_value=0.0,
                     help="Market value per share on the release date in USD, e.g. 12.3456"
+                ),
+                "Sale price per share ($)": st.column_config.NumberColumn(
+                    "Sale price / share ($)", format="$%.4f", step=0.0001, min_value=0.0,
+                    help="Broker's actual sale price per withheld share (sell-to-cover only); "
+                         "leave blank for net-settled (Shares Traded) releases"
                 ),
                 "Award Date": st.column_config.TextColumn(
                     "Award Date", help="Date the grant was awarded (YYYY-MM-DD)"
@@ -503,7 +506,7 @@ if st.session_state.results is not None:
         ccb.TYPE_LABEL, ccb.DATE_LABEL,
         ccb.GRANTED_LABEL, ccb.SOLD_LABEL, ccb.ISSUED_LABEL,
         ccb.PRICE_PER_SHARE_USD_LABEL, ccb.GBP_USD_LABEL,
-        ccb.PRICE_PER_SHARE_GBP_LABEL,
+        ccb.PRICE_PER_SHARE_GBP_LABEL, ccb.SALE_PRICE_PER_SHARE_GBP_LABEL,
         ccb.OWNED_SHARES_LABEL, ccb.AVG_COST_GBP_LABEL, ccb.HOLDINGS_GBP_LABEL,
         ccb.GAINS_LABEL, ccb.MATCHING_LABEL,
     ]
@@ -519,7 +522,8 @@ if st.session_state.results is not None:
             {
                 ccb.PRICE_PER_SHARE_USD_LABEL: "${:.4f}",
                 ccb.GBP_USD_LABEL:             "{:.4f}",
-                ccb.PRICE_PER_SHARE_GBP_LABEL: "£{:.4f}",
+                ccb.PRICE_PER_SHARE_GBP_LABEL:      "£{:.4f}",
+                ccb.SALE_PRICE_PER_SHARE_GBP_LABEL: "£{:.4f}",
                 ccb.OWNED_SHARES_LABEL:        "{:,.0f}",
                 ccb.AVG_COST_GBP_LABEL:        "£{:.4f}",
                 ccb.HOLDINGS_GBP_LABEL:        "£{:,.2f}",
