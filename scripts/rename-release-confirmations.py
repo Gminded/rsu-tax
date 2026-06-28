@@ -57,10 +57,14 @@ def safe_part(s: Optional[str], fallback: str) -> str:
     return s or fallback
 
 def build_target_name(meta: Dict[str, object]) -> str:
-    # parse_pdf returns dates as YYYY-MM-DD
+    # parse_pdf returns dates as YYYY-MM-DD.  The filename reflects what the
+    # document literally says, so it uses the *nominal* release date (decision B);
+    # the trading-day correction lives in the data, not the file name.  Older
+    # parses without the nominal field fall back to "Release Date".
     award_date = safe_part(meta.get("Award Date"), "unknown-awarddate")
     award_num  = safe_part(str(meta.get("Award Number") or ""), "unknown-awardnum")
-    release_dt = safe_part(meta.get("Release Date"), "unknown-releasedate")
+    release_dt = safe_part(meta.get("Nominal Release Date") or meta.get("Release Date"),
+                           "unknown-releasedate")
     return f'{award_date}-{award_num}-{release_dt}.pdf'
 
 def rename_file(src: Path, dry_run: bool = False, overwrite: bool = False) -> Optional[Path]:
@@ -86,7 +90,13 @@ def rename_file(src: Path, dry_run: bool = False, overwrite: bool = False) -> Op
 
     if dst.exists() and not overwrite:
         if src.read_bytes() == dst.read_bytes():
-            print(f"Already renamed (identical content): {src.name} -> {dst.name}")
+            # Same document already at the target name: the file being renamed is
+            # a byte-for-byte duplicate, so remove it.  This makes repeated
+            # download runs self-dedupe instead of piling up identical PDFs.
+            print(f"Duplicate of existing {dst.name}; "
+                  f"{'would remove' if dry_run else 'removing'} {src.name}")
+            if not dry_run:
+                src.unlink()
             return dst
         print(
             f"[ERROR] Cannot rename '{src.name}' -> '{dst.name}': "
