@@ -40,8 +40,10 @@ drop or duplicate releases (and under-count total holdings as a result).
 """
 
 import asyncio
+import csv
 import datetime as dt
 import importlib.util
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -53,13 +55,26 @@ ETRADE_URL = "https://us.etrade.com/etx/sp/stockplan#/myAccount/stockPlanConfirm
 CONFIRMATIONS_API = "https://us.etrade.com/webapisp/stockplan/ah/confirmations.json"
 # Per-confirmation PDF endpoint (eId = encrypted employee id, cId = confirmationId).
 PDF_API = "https://us.etrade.com/webapisp/stockplan/pdf/getReleaseConfirmation.pdf"
+# JSON API that lists executed orders (disposals) for a date range.
+ORDERS_API = "https://us.etrade.com/webapisp/stockplan/ah/orders.json"
 # Pull everything from the start of the first grant year to today.
 START_DATE = "1/1/2018"
+START_YEAR = 2018
 
 SCRIPTS_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPTS_DIR.parent
 OUTPUT_DIR = PROJECT_DIR / "release-confirmations"
+ORDERS_CSV = PROJECT_DIR / "sales" / "orders.csv"
 SESSION_FILE = PROJECT_DIR / ".etrade_session.json"
+
+# Broker/SEC charges on a disposal — all allowable incidental costs (TCGA 1992
+# s.38(1)(c)).  Summed into one Fee.  applicableTax is income tax, NOT a disposal
+# cost, so it is deliberately excluded.
+_FEE_FIELDS = ("commissionFee", "postageHandlingFee", "brokerAssitFee",
+               "specialHandlingFee", "secFee")
+# orders.csv schema — names load_sales (in calculate-cost-basis.py) recognises,
+# matching sales/sales.csv so both files load identically.
+ORDERS_COLS = ["Date", "Type", "Shares", "Price per share ($)", "Fee ($)"]
 
 # Load rename-release-confirmations (hyphenated name requires importlib)
 sys.path.insert(0, str(SCRIPTS_DIR))
@@ -147,6 +162,115 @@ async def _capture_api_token(page) -> dict:
             break
     page.remove_listener("request", on_request)
     return token
+
+
+def _order_date(o: dict) -> Optional[str]:
+    """Trade-execution date of an order as 'YYYY-MM-DD'.
+
+    Prefer executionDate ('YYYYMMDDhhmmss'); fall back to actionDate
+    ('MM/DD/YYYY').  This is the disposal's contract date for HMRC, not the later
+    settlement date."""
+    ed = str(o.get("executionDate") or "").strip()
+    if len(ed) >= 8 and ed[:8].isdigit():
+        return f"{ed[0:4]}-{ed[4:6]}-{ed[6:8]}"
+    m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", str(o.get("actionDate") or "").strip())
+    if m:
+        return f"{m.group(3)}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"
+    return None
+
+
+def _orders_to_rows(orders: list[dict]) -> list[dict]:
+    """Convert the orders.json `data.pse.list` into orders.csv row dicts.
+
+    Pure (no I/O) so it is unit-testable against a captured sample.  Only Settled
+    orders are real disposals: Cancelled/Rejected/Open/Pending orders never
+    completed and must be discarded (a cancelled order is not a chargeable
+    disposal).  Rows with no executed price or shares are skipped defensively.
+    """
+    rows = []
+    for o in orders:
+        status = str(o.get("status") or "").strip().lower()
+        if status != "settled" and str(o.get("statusCode") or "").upper() != "SE":
+            continue
+        shares = o.get("numberOfShares") or 0
+        price = o.get("executedPrice") or o.get("avgPrice") or 0
+        if not shares or not price:
+            continue
+        date = _order_date(o)
+        if not date:
+            continue
+        fee = sum(float(o.get(f) or 0) for f in _FEE_FIELDS)
+        rows.append({
+            "Date":                date,
+            "Type":                o.get("transType") or "Sell",
+            "Shares":              shares,
+            "Price per share ($)": price,
+            "Fee ($)":             round(fee, 2),
+        })
+    return rows
+
+
+async def fetch_orders(context, token: dict) -> list[dict]:
+    """Pull executed orders year-by-year from START_YEAR to this year.
+
+    Queried per calendar year because the captured payload spans a single year;
+    results are deduplicated by tradeId so a server that ignores our dates (the
+    dateRangeSet preset) cannot inflate the list.
+    # ponytail: dedupe by tradeId guards the per-year loop against duplicate returns.
+    """
+    seen: set = set()
+    raw: list[dict] = []
+    for year in range(START_YEAR, dt.date.today().year + 1):
+        payload = {"value": {
+            "encryptedEmployeeId": token["eId"],
+            "startDate":   f"01/01/{year}",
+            "endDate":     f"12/31/{year}",
+            "dateRangeSet": 1,
+            "getTradeDetails": "N",
+            "getOrderHistory": "N",
+            "getNetProceeds":  "N",
+        }}
+        resp = await context.request.post(
+            ORDERS_API,
+            data=payload,
+            headers={
+                "content-type": "application/json; charset=UTF-8",
+                "accept": "application/json, text/plain, */*",
+                "stk1": token["stk1"],
+            },
+        )
+        body = await resp.json()
+        orders = (((body or {}).get("data") or {}).get("pse") or {}).get("list") or []
+        for o in orders:
+            tid = o.get("tradeId")
+            if tid in seen:
+                continue
+            seen.add(tid)
+            raw.append(o)
+    return _orders_to_rows(raw)
+
+
+async def download_orders(context, token: dict) -> None:
+    """Fetch executed orders and write sales/orders.csv (the disposal feed)."""
+    print("Fetching order history...", end=" ", flush=True)
+    try:
+        rows = await fetch_orders(context, token)
+    except Exception as exc:
+        print(f"FAILED ({exc}). Skipping orders.csv.")
+        return
+    rows.sort(key=lambda r: r["Date"])
+    ORDERS_CSV.parent.mkdir(exist_ok=True)
+    with ORDERS_CSV.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=ORDERS_COLS)
+        w.writeheader()
+        w.writerows(rows)
+    if rows:
+        print(f"done. ({len(rows)} order(s), {rows[0]['Date']} → {rows[-1]['Date']})")
+        print(f"  Wrote {ORDERS_CSV.relative_to(PROJECT_DIR)}. "
+              f"Earliest order: {rows[0]['Date']} — older sell-to-cover sales (if "
+              f"any) must be added manually to sales/sales.csv.")
+    else:
+        print("done. (no executed orders found)")
 
 
 async def main():
@@ -246,6 +370,8 @@ async def main():
 
         print(f"\nDone. Downloaded: {downloaded}  Skipped: {skipped}  Failed: {failed}")
         print(f"Files are in: {OUTPUT_DIR}")
+
+        await download_orders(context, token)
         await browser.close()
 
 
