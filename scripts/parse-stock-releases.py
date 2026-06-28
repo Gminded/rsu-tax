@@ -28,7 +28,7 @@ def main(argv: List[str]) -> int:
         return 2
 
     fieldnames = ["Release Date", "Granted", "Sold", "Issued",
-                  "Price per share ($)", "Sale price per share ($)"]
+                  "Price per share ($)", "Sale price per share ($)", "Fee ($)"]
     writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
     writer.writeheader()
 

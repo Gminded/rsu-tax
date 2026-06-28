@@ -31,6 +31,8 @@ PRICE_PER_SHARE_USD_LABEL = "Price per share ($)"
 PRICE_PER_SHARE_GBP_LABEL = "Price per share (GBP)"
 SALE_PRICE_PER_SHARE_USD_LABEL = "Sale price per share ($)"
 SALE_PRICE_PER_SHARE_GBP_LABEL = "Sale price per share (GBP)"
+FEE_USD_LABEL             = "Fee ($)"
+FEE_GBP_LABEL             = "Fee (GBP)"
 GBP_USD_LABEL             = "GBP/USD"
 HOLDINGS_GBP_LABEL        = "Holdings (GBP)"
 OWNED_SHARES_LABEL        = "Owned shares"
@@ -81,6 +83,15 @@ def require_float(val, label: str, context: str) -> float:
         raise ValueError(f"[{context}] Required field '{label}' is missing or empty")
     return float(val)
 
+def _fee_gbp(rec) -> float:
+    """Incidental cost of disposal (GBP) for a row, or 0.0 when none is recorded.
+    Optional everywhere — most disposals carry no fee — so a missing/NaN value is
+    treated as zero rather than an error."""
+    fee = rec.get(FEE_GBP_LABEL)
+    if fee is None or (isinstance(fee, float) and math.isnan(fee)):
+        return 0.0
+    return float(fee)
+
 # ---------- Date parsing ----------
 def parse_date_ymd(s: str) -> datetime:
     s = str(s).strip().replace("/", "-")
@@ -112,6 +123,7 @@ CANDIDATE_DATE   = ["date", "sale date", "transaction date"]
 CANDIDATE_SHARES = ["shares", "quantity", "units", "issued", "shares sold", "qty"]
 CANDIDATE_PRICE  = ["price per share ($)", "priceusd", "price", "sale price", "sale price ($)"]
 CANDIDATE_TYPE   = ["type", "transaction type", "record type", "buy/sell", "side", "action"]
+CANDIDATE_FEE    = ["fee ($)", "fee", "fees", "commission", "broker fee"]
 
 # Tokens that mark a row as an acquisition (anything else is treated as a Sell).
 _BUY_TOKENS = ("buy", "acqui", "purchase", "espp", "osps", "exercise", "vest", "reinvest")
@@ -143,6 +155,7 @@ def load_sales(sales_csv: str) -> pd.DataFrame:
     shares_col = _find_col(cols, CANDIDATE_SHARES)
     price_col  = _find_col(cols, CANDIDATE_PRICE)
     type_col   = _find_col(cols, CANDIDATE_TYPE)
+    fee_col    = _find_col(cols, CANDIDATE_FEE)
     if not date_col or not shares_col or not price_col:
         raise ValueError(
             f"sales.csv missing recognizable columns. "
@@ -159,6 +172,10 @@ def load_sales(sales_csv: str) -> pd.DataFrame:
     # Section 104 pool as RSU releases.  Absent → every row is a Sell.
     if type_col:
         out[TYPE_LABEL] = s[type_col].apply(_classify_type)
+    # An optional Fee column carries the broker fee on a disposal (an allowable
+    # incidental cost of disposal); absent → no fee is deducted.
+    if fee_col:
+        out[FEE_USD_LABEL] = pd.to_numeric(s[fee_col], errors="coerce").abs()
     return out
 
 
@@ -285,22 +302,25 @@ def get_gains_and_holdings(events: pd.DataFrame):
             # Shares the broker sold to cover income tax on the vest.  These were
             # never in the Section 104 pool: under the same-day rule their cost
             # basis is the acquisition cost (market value at release = price_gbp),
-            # and the proceeds are the broker's actual sale price.  When the
-            # shares were net-settled at market value (no separate sale price)
-            # the gain is zero.
+            # and the proceeds are the broker's actual sale price, less any
+            # broker fee on that sale (an allowable incidental cost of disposal).
+            # When the shares were net-settled at market value (no separate sale
+            # price and no fee) the gain is zero.
             units    = require_float(rec[SOLD_LABEL], SOLD_LABEL, rec[DATE_LABEL])
             sale_gbp = rec.get(SALE_PRICE_PER_SHARE_GBP_LABEL)
             if sale_gbp is None or (isinstance(sale_gbp, float) and math.isnan(sale_gbp)):
                 sale_gbp = price_gbp
-            gain = (sale_gbp - price_gbp) * units
+            fee  = _fee_gbp(rec)
+            gain = (sale_gbp - price_gbp) * units - fee
             gains.append(gain)
             pool_costs_out.append(pool_cost)
             pool_units_out.append(pool_units)
             if abs(gain) > 1e-9:
-                matching_notes.append(
-                    f"same-day rule (tax withholding); sold {units:.0f} sh @ "
-                    f"£{sale_gbp:.4f} vs MV £{price_gbp:.4f}"
-                )
+                note = (f"same-day rule (tax withholding); sold {units:.0f} sh @ "
+                        f"£{sale_gbp:.4f} vs MV £{price_gbp:.4f}")
+                if fee > 1e-9:
+                    note += f"; less £{fee:.2f} fee"
+                matching_notes.append(note)
             else:
                 matching_notes.append("same-day rule (tax withholding)")
 
@@ -334,7 +354,13 @@ def get_gains_and_holdings(events: pd.DataFrame):
             if pool_units < -1e-9:
                 raise ValueError(f"[{rec[DATE_LABEL]}] Pool units went negative: {pool_units:.4f}")
 
-            gains.append(proceeds - allowable)
+            # Broker fee on the disposal is an allowable incidental cost (TCGA
+            # 1992 s.38(1)(c)); deduct it from the gain alongside the cost basis.
+            fee = _fee_gbp(rec)
+            if fee > 1e-9:
+                notes.append(f"less £{fee:.2f} fee")
+
+            gains.append(proceeds - allowable - fee)
             pool_costs_out.append(pool_cost)
             pool_units_out.append(pool_units)
             matching_notes.append(", ".join(notes) if notes else "Section 104")
@@ -452,14 +478,14 @@ def print_tax_year_summary(events: pd.DataFrame) -> None:
 def print_events(events: pd.DataFrame) -> None:
     output_cols = [
         TYPE_LABEL, DATE_LABEL, GRANTED_LABEL, SOLD_LABEL, ISSUED_LABEL,
-        PRICE_PER_SHARE_USD_LABEL, SALE_PRICE_PER_SHARE_USD_LABEL,
+        PRICE_PER_SHARE_USD_LABEL, SALE_PRICE_PER_SHARE_USD_LABEL, FEE_USD_LABEL,
         GBP_USD_LABEL, PRICE_PER_SHARE_GBP_LABEL, SALE_PRICE_PER_SHARE_GBP_LABEL,
-        HOLDINGS_GBP_LABEL, GAINS_LABEL, MATCHING_LABEL,
+        FEE_GBP_LABEL, HOLDINGS_GBP_LABEL, GAINS_LABEL, MATCHING_LABEL,
     ]
     out = events.copy()
-    for c in (PRICE_PER_SHARE_USD_LABEL, SALE_PRICE_PER_SHARE_USD_LABEL,
+    for c in (PRICE_PER_SHARE_USD_LABEL, SALE_PRICE_PER_SHARE_USD_LABEL, FEE_USD_LABEL,
               GBP_USD_LABEL, PRICE_PER_SHARE_GBP_LABEL, SALE_PRICE_PER_SHARE_GBP_LABEL,
-              GAINS_LABEL, HOLDINGS_GBP_LABEL):
+              FEE_GBP_LABEL, GAINS_LABEL, HOLDINGS_GBP_LABEL):
         out[c] = out[c].apply(lambda x: f"{x:.4f}" if pd.notnull(x) else "")
     out.to_csv(sys.stdout, index=False, columns=output_cols, float_format="%.0f")
 
@@ -470,7 +496,8 @@ def print_events(events: pd.DataFrame) -> None:
 _EVENT_COLS = [
     TYPE_LABEL, DATE_LABEL, DATE_DT,
     GRANTED_LABEL, SOLD_LABEL, ISSUED_LABEL,
-    PRICE_PER_SHARE_USD_LABEL, SALE_PRICE_PER_SHARE_USD_LABEL, GBP_USD_LABEL,
+    PRICE_PER_SHARE_USD_LABEL, SALE_PRICE_PER_SHARE_USD_LABEL, FEE_USD_LABEL,
+    GBP_USD_LABEL,
 ]
 
 
@@ -494,6 +521,11 @@ def _normalise_releases(releases: pd.DataFrame) -> pd.DataFrame:
     # withheld shares on the market (rather than net-settling at market value).
     if SALE_PRICE_PER_SHARE_USD_LABEL not in rel.columns:
         rel[SALE_PRICE_PER_SHARE_USD_LABEL] = float("nan")
+
+    # Fee is present only on sell-to-cover releases (the broker fee on selling
+    # the withheld shares); it attaches to the WithholdingSell, not the pool.
+    if FEE_USD_LABEL not in rel.columns:
+        rel[FEE_USD_LABEL] = float("nan")
 
     rel[TYPE_LABEL] = BUY_TYPE
     return rel
@@ -529,6 +561,9 @@ def _withholding_sell_rows(rel: pd.DataFrame) -> list[dict]:
             ISSUED_LABEL:                   0.0,
             PRICE_PER_SHARE_USD_LABEL:      row[PRICE_PER_SHARE_USD_LABEL],
             SALE_PRICE_PER_SHARE_USD_LABEL: row[SALE_PRICE_PER_SHARE_USD_LABEL],
+            # The broker fee on the sell-to-cover sale travels with the disposal
+            # (the WithholdingSell), where it is deducted from the gain.
+            FEE_USD_LABEL:                  row.get(FEE_USD_LABEL, float("nan")),
             GBP_USD_LABEL:                  row[GBP_USD_LABEL],
         })
     return ws_rows
@@ -558,6 +593,13 @@ def build_events(releases: pd.DataFrame,
 
     ws_rows = _withholding_sell_rows(rel)
 
+    # A release becomes a Buy (issued shares into the pool) plus, where shares
+    # were withheld, a WithholdingSell.  The fee belongs to that disposal, which
+    # has now captured it in ws_rows, so clear it from the Buy rows — the issued
+    # shares were not sold and bear no disposal cost.
+    rel = rel.copy()
+    rel[FEE_USD_LABEL] = float("nan")
+
     events_parts = [rel]
 
     if sales is not None and not sales.empty:
@@ -580,6 +622,11 @@ def build_events(releases: pd.DataFrame,
         s[SOLD_LABEL]    = qty.where(~is_buy, 0.0)
         if SALE_PRICE_PER_SHARE_USD_LABEL not in s.columns:
             s[SALE_PRICE_PER_SHARE_USD_LABEL] = float("nan")
+        # A fee is an incidental cost of *disposal*: keep it on Sell rows only.
+        # A generic Buy (e.g. ESPP) is an acquisition and is not handled here.
+        if FEE_USD_LABEL not in s.columns:
+            s[FEE_USD_LABEL] = float("nan")
+        s[FEE_USD_LABEL] = s[FEE_USD_LABEL].where(~is_buy, float("nan"))
         s = s[_EVENT_COLS]
         events_parts.append(s)
 
@@ -603,6 +650,10 @@ def build_events(releases: pd.DataFrame,
     )
     events[SALE_PRICE_PER_SHARE_GBP_LABEL] = (
         events[SALE_PRICE_PER_SHARE_USD_LABEL] / events[GBP_USD_LABEL]
+    )
+    # Fee is a total (not per-share) cash amount; convert at the same date's rate.
+    events[FEE_GBP_LABEL] = (
+        events[FEE_USD_LABEL] / events[GBP_USD_LABEL]
     )
 
     # HMRC matching + Section 104 pool.  The matching runs at full floating-point

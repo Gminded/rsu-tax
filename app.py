@@ -30,12 +30,12 @@ _EXRATES_DIR = _ROOT / "monthly-exchange-rates-by-hmrc"
 _SALES_CSV   = _ROOT / "sales" / "sales.csv"
 
 _RELEASE_COLS = ["Release Date", "Granted", "Sold", "Issued", "Price per share ($)",
-                 "Sale price per share ($)", "Award Date", "Award Number"]
+                 "Sale price per share ($)", "Fee ($)", "Award Date", "Award Number"]
 # A release is uniquely identified by its grant (Award Number) and the date it
 # vested. Two different grants can vest on the same date with identical share
 # counts and price, so we must NOT deduplicate on (Release Date, Granted) alone.
 _RELEASE_KEY  = ["Release Date", "Award Number"]
-_SALES_COLS   = ["Date", "Type", "Shares", "Price per share ($)"]
+_SALES_COLS   = ["Date", "Type", "Shares", "Price per share ($)", "Fee ($)"]
 _XR_FIELDS    = ["Country/Territories", "Currency", "Currency code",
                  "Currency units per £1", "Start Date", "End Date"]
 
@@ -175,6 +175,11 @@ def _run_calculation(releases_df, sales_df, exrates_df) -> pd.DataFrame:
             sales[ccb.TYPE_LABEL] = (
                 valid_sales["Type"].apply(ccb._classify_type).values
             )
+        # Optional Fee column: an allowable incidental cost of disposal in USD.
+        if "Fee ($)" in valid_sales.columns:
+            sales[ccb.FEE_USD_LABEL] = pd.to_numeric(
+                valid_sales["Fee ($)"], errors="coerce"
+            ).abs().values
 
     return ccb.build_events(releases_df, sales, exrates_df)
 
@@ -296,6 +301,12 @@ with st.expander(
                     help="Broker's actual sale price per withheld share (sell-to-cover only); "
                          "leave blank for net-settled (Shares Traded) releases"
                 ),
+                "Fee ($)": st.column_config.NumberColumn(
+                    "Fee ($)", format="$%.2f", step=0.01, min_value=0.0,
+                    help="Broker fee on the sell-to-cover sale (from the Cash "
+                         "Distribution section), in USD. An allowable incidental "
+                         "cost of disposal; leave blank for net-settled releases."
+                ),
                 "Award Date": st.column_config.TextColumn(
                     "Award Date", help="Date the grant was awarded (YYYY-MM-DD)"
                 ),
@@ -356,6 +367,14 @@ with st.expander("Sales & other acquisitions", expanded=False):
                 step=0.0001,
                 min_value=0.0,
                 default=0.0,
+            ),
+            "Fee ($)": st.column_config.NumberColumn(
+                "Fee ($)",
+                help="Broker fee on this disposal in USD (an allowable incidental "
+                     "cost of disposal); leave blank if none.",
+                format="$%.2f",
+                step=0.01,
+                min_value=0.0,
             ),
         },
     )
@@ -515,7 +534,7 @@ if st.session_state.results is not None:
         TRANSFERRED_LABEL, ccb.OWNED_SHARES_LABEL,
         ccb.PRICE_PER_SHARE_USD_LABEL, ccb.PRICE_PER_SHARE_GBP_LABEL,
         ccb.AVG_COST_GBP_LABEL, ccb.HOLDINGS_GBP_LABEL,
-        ccb.GAINS_LABEL, ccb.MATCHING_LABEL,
+        ccb.FEE_GBP_LABEL, ccb.GAINS_LABEL, ccb.MATCHING_LABEL,
     ]
     display = display[output_cols]
 
@@ -529,6 +548,7 @@ if st.session_state.results is not None:
                 ccb.OWNED_SHARES_LABEL:        "{:,.0f}",
                 ccb.AVG_COST_GBP_LABEL:        "£{:.4f}",
                 ccb.HOLDINGS_GBP_LABEL:        "£{:,.2f}",
+                ccb.FEE_GBP_LABEL:             "£{:,.2f}",
                 ccb.GAINS_LABEL:               "£{:,.2f}",
                 TRANSFERRED_LABEL:             "{:,.0f}",
             },

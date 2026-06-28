@@ -36,14 +36,22 @@ def _collect_boxes(pdf_path: Path):
                     boxes.append({"text": text, "x0": x0, "y0": y0, "x1": x1, "y1": y1})
     return boxes
 
+def _neighbor_block_right_of(boxes, box, y_tol=8) -> Optional[str]:
+    """Text of the leftmost box sitting to the right of `box`, on the same row
+    (vertical centres within `y_tol`).  Shared by the label-search variant below
+    and by callers that already hold the label box (e.g. the Cash Distribution
+    column, whose label and value blocks are each multi-line)."""
+    y_center = (box["y0"] + box["y1"]) / 2
+    right = [r for r in boxes if r["x0"] > box["x1"] and abs(((r["y0"]+r["y1"])/2) - y_center) < y_tol]
+    right = sorted(right, key=lambda r: r["x0"])
+    return right[0]["text"] if right else None
+
 def _neighbor_block_right(boxes, label, y_tol=8) -> Optional[str]:
     cands = [b for b in boxes if label.lower() in b["text"].lower()]
     for b in cands:
-        y_center = (b["y0"] + b["y1"]) / 2
-        right = [r for r in boxes if r["x0"] > b["x1"] and abs(((r["y0"]+r["y1"])/2) - y_center) < y_tol]
-        right = sorted(right, key=lambda r: r["x0"])
-        if right:
-            return right[0]["text"]
+        block = _neighbor_block_right_of(boxes, b, y_tol)
+        if block is not None:
+            return block
     return None
 
 def _first_match(pattern, lines: List[str]) -> Optional[str]:
@@ -173,6 +181,35 @@ def parse_pdf(pdf_path: Path) -> Dict[str, Optional[str]]:
                 award_number = value[0]
                 break
 
+    # Fee — incidental cost of disposal, allowable under TCGA 1992 s.38(1)(c).
+    # It appears only on Sell-to-cover releases, in the "Cash Distribution"
+    # section, where the withheld shares were sold on the open market.  Labels
+    # and amounts sit in two vertically-aligned column blocks, e.g.
+    #     Total Sale Price        $4,023.46
+    #     Total Tax              ($3,922.65)
+    #     Fee                       ($21.79)
+    #     Total Due Participant      $79.02
+    # Pair the two blocks line-by-line and read the row whose label is "Fee", so
+    # the value is found by its label rather than a fixed offset.  Absent (a
+    # net-settled "Shares Traded" release) leaves the fee None.
+    fee = None
+    for b in boxes:
+        label_lines = [ln.strip() for ln in b["text"].splitlines() if ln.strip()]
+        if "Fee" not in label_lines:
+            continue
+        value_block = _neighbor_block_right_of(boxes, b)
+        if not value_block:
+            continue
+        value_lines = [ln.strip() for ln in value_block.splitlines() if ln.strip()]
+        if len(value_lines) != len(label_lines):
+            continue
+        fee = _clean_num(value_lines[label_lines.index("Fee")])
+        break
+    # The PDF shows the fee as a negative cash movement, e.g. ($21.79); carry it
+    # as a positive cost magnitude so callers can subtract it from the gain.
+    if fee is not None:
+        fee = abs(fee)
+
     # Validate Issued == Granted - Withheld
     if int(round(issued)) != int(round(grant)) - withheld:
         raise ValueError(
@@ -187,6 +224,7 @@ def parse_pdf(pdf_path: Path) -> Dict[str, Optional[str]]:
         "Issued": int(round(issued)) if issued is not None else None,
         "Price per share ($)": round(mv, 2) if mv is not None else None,
         "Sale price per share ($)": round(sale, 2) if sale is not None else None,
+        "Fee ($)": round(fee, 2) if fee is not None else None,
         "Award Date": award_date_out,
         "Award Number": award_number,
     }

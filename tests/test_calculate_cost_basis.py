@@ -419,6 +419,104 @@ class TestWithholdingSell:
         assert not any(r["Type"] == "WithholdingSell" for r in rows)
 
 
+# ── Fees (allowable incidental costs of disposal) ─────────────────────────────
+
+class TestFees:
+    def test_sell_fee_deducted_from_gain(self, ccb, mk):
+        """A broker fee on a Sell reduces the chargeable gain pound-for-pound."""
+        events = mk([
+            (ccb.BUY_TYPE,  "2020-01-01", 100, 10.0),
+            (ccb.SELL_TYPE, "2020-06-01",  50, 15.0),
+        ])
+        events[ccb.FEE_GBP_LABEL] = [float("nan"), 20.0]
+        gains, _, notes, _ = ccb.get_gains_and_holdings(events)
+        # Without fee: 50*15 - 50*10 = 250; with £20 fee: 230.
+        assert gains[1] == pytest.approx(50 * 15 - 50 * 10 - 20.0)
+        assert "fee" in notes[1]
+
+    def test_withholding_sell_fee_creates_allowable_loss(self, ccb):
+        """Sell-to-cover at market value but with a fee → loss equal to the fee."""
+        events = pd.DataFrame([
+            {ccb.TYPE_LABEL: ccb.BUY_TYPE, ccb.DATE_LABEL: "2020-01-01",
+             ccb.DATE_DT: datetime(2020, 1, 1), ccb.GRANTED_LABEL: 800.0,
+             ccb.SOLD_LABEL: 0.0, ccb.ISSUED_LABEL: 800.0,
+             ccb.PRICE_PER_SHARE_GBP_LABEL: 10.0,
+             ccb.SALE_PRICE_PER_SHARE_GBP_LABEL: float("nan"),
+             ccb.FEE_GBP_LABEL: float("nan")},
+            {ccb.TYPE_LABEL: ccb.WITHHOLDING_SELL_TYPE, ccb.DATE_LABEL: "2020-01-01",
+             ccb.DATE_DT: datetime(2020, 1, 1), ccb.GRANTED_LABEL: 0.0,
+             ccb.SOLD_LABEL: 200.0, ccb.ISSUED_LABEL: 0.0,
+             ccb.PRICE_PER_SHARE_GBP_LABEL: 10.0,
+             ccb.SALE_PRICE_PER_SHARE_GBP_LABEL: 10.0,
+             ccb.FEE_GBP_LABEL: 30.0},
+        ])
+        gains, _, notes, _ = ccb.get_gains_and_holdings(events)
+        assert gains[1] == pytest.approx(-30.0)
+        assert "fee" in notes[1]
+
+    def test_missing_fee_column_is_treated_as_zero(self, ccb, mk):
+        """get_gains_and_holdings must tolerate events with no Fee column."""
+        events = mk([
+            (ccb.BUY_TYPE,  "2020-01-01", 100, 10.0),
+            (ccb.SELL_TYPE, "2020-06-01",  50, 15.0),
+        ])
+        assert ccb.FEE_GBP_LABEL not in events.columns
+        gains, _, _, _ = ccb.get_gains_and_holdings(events)
+        assert gains[1] == pytest.approx(50 * 15 - 50 * 10)
+
+    def test_load_sales_picks_up_fee_column(self, ccb, tmp_path):
+        p = tmp_path / "sales.csv"
+        p.write_text(
+            "Date,Shares,Price per share ($),Fee\n"
+            "2023-01-15,100,25.50,12.30\n"
+        )
+        df = ccb.load_sales(str(p))
+        assert df[ccb.FEE_USD_LABEL].iloc[0] == pytest.approx(12.30)
+
+    def test_release_fee_flows_to_withholding_sell_not_pool(self, ccb):
+        """A release Fee attaches to the WithholdingSell disposal; the issued
+        shares enter the pool at market value, undiminished by the fee."""
+        rel = pd.DataFrame({
+            "Release Date":             ["2020-06-01"],
+            "Granted":                  [1000], "Sold": [200], "Issued": [800],
+            "Price per share ($)":      [10.0],
+            "Sale price per share ($)": [10.0],
+            "Fee ($)":                  [50.0],
+        })
+        xr = pd.DataFrame({"Start Date": ["01/01/2020"], "End Date": ["31/12/2020"],
+                           "Currency units per £1": [1.0]})
+        ev = ccb.build_events(rel, None, xr)
+        buy = ev[ev[ccb.TYPE_LABEL] == ccb.BUY_TYPE].iloc[0]
+        ws  = ev[ev[ccb.TYPE_LABEL] == ccb.WITHHOLDING_SELL_TYPE].iloc[0]
+        # Pool holds 800 issued shares at £10 — the fee did not reduce the cost.
+        assert buy[ccb.HOLDINGS_GBP_LABEL] == pytest.approx(800 * 10.0)
+        assert pd.isna(buy[ccb.FEE_GBP_LABEL])
+        # The WithholdingSell carries the fee and realises a £50 allowable loss.
+        assert ws[ccb.FEE_GBP_LABEL] == pytest.approx(50.0)
+        assert ws[ccb.GAINS_LABEL] == pytest.approx(-50.0)
+
+    def test_sales_fee_in_pipeline_reduces_gain(self, ccb, tmp_path, capsys):
+        xr = tmp_path / "xr.csv"
+        xr.write_text(
+            "Country/Territories,Currency,Currency code,"
+            "Currency units per £1,Start Date,End Date\n"
+            "USA,Dollar,USD,1.0000,01/01/2020,31/12/2020\n"
+        )
+        rel = tmp_path / "rel.csv"
+        rel.write_text(
+            "Release Date,Granted,Sold,Issued,Price per share ($)\n"
+            "2020-01-01,100,0,100,10.00\n"
+        )
+        sales = tmp_path / "sales.csv"
+        sales.write_text("Date,Shares,Price per share ($),Fee ($)\n2020-09-01,50,15.00,25.00\n")
+        ccb.main(["prog", "-r", str(rel), "-x", str(xr), "-s", str(sales)])
+        out = capsys.readouterr().out
+        rows = list(csv.DictReader(io.StringIO(out)))
+        sell = next(r for r in rows if r["Type"] == "Sell")
+        assert float(sell["Gains / Losses (GBP)"]) == pytest.approx(50 * 15 - 50 * 10 - 25.0)
+        assert float(sell["Fee (GBP)"]) == pytest.approx(25.0)
+
+
 # ── Tax-year label ────────────────────────────────────────────────────────────
 
 class TestTaxYearLabel:

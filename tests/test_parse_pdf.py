@@ -271,6 +271,66 @@ class TestParsePdfErrors:
         assert result["Issued"] == 800
         assert result["Price per share ($)"] == pytest.approx(100.00)
 
+    def test_no_cash_distribution_block_means_no_fee(self, parse_pdf_mod):
+        """A net-settled release has no Cash Distribution / Fee → Fee is None."""
+        with self._patch(parse_pdf_mod, _full_boxes()):
+            result = parse_pdf_mod.parse_pdf(Path("dummy.pdf"))
+        assert result["Fee ($)"] is None
+
+
+# ── Fee extraction (Cash Distribution block) ──────────────────────────────────
+
+def _cash_distribution_boxes(y=200):
+    """A Cash Distribution section: a multi-line label column and an aligned
+    multi-line value column, mirroring the real sell-to-cover layout."""
+    return [
+        {"text": "Total Sale Price\nTotal Tax\nFee\nTotal Due Participant",
+         "x0": 0,  "y0": y, "x1": 80,  "y1": y + 40},
+        {"text": "$4,023.46\n($3,922.65)\n($21.79)\n$79.02",
+         "x0": 90, "y0": y, "x1": 250, "y1": y + 40},
+    ]
+
+
+class TestParsePdfFee:
+    def _patch(self, parse_pdf_mod, boxes):
+        return patch.object(parse_pdf_mod, "_collect_boxes", return_value=boxes)
+
+    def test_fee_extracted_by_its_label_position(self, parse_pdf_mod):
+        """The Fee value is found via its label row, not a fixed offset, and is
+        carried as a positive cost magnitude even though the PDF shows ($21.79)."""
+        boxes = _full_boxes() + _cash_distribution_boxes()
+        with self._patch(parse_pdf_mod, boxes):
+            result = parse_pdf_mod.parse_pdf(Path("dummy.pdf"))
+        assert result["Fee ($)"] == pytest.approx(21.79)
+
+    def test_misaligned_value_block_leaves_fee_none(self, parse_pdf_mod):
+        """If the label and value columns disagree on line count, don't guess."""
+        boxes = _full_boxes() + [
+            {"text": "Total Sale Price\nTotal Tax\nFee\nTotal Due Participant",
+             "x0": 0,  "y0": 200, "x1": 80,  "y1": 240},
+            {"text": "$4,023.46\n($21.79)",   # only two values for four labels
+             "x0": 90, "y0": 200, "x1": 250, "y1": 240},
+        ]
+        with self._patch(parse_pdf_mod, boxes):
+            result = parse_pdf_mod.parse_pdf(Path("dummy.pdf"))
+        assert result["Fee ($)"] is None
+
+    REPO = __import__("pathlib").Path(__file__).parent.parent
+    SOLD_PDF   = REPO / "release-confirmations" / "2018-02-01-R1084-2020-06-01.pdf"
+    TRADED_PDF = REPO / "release-confirmations" / "2018-02-01-R1084-2018-11-15.pdf"
+
+    def test_real_sell_to_cover_pdf_has_fee(self, parse_pdf_mod):
+        if not self.SOLD_PDF.exists():
+            pytest.skip("sample PDF not present")
+        row = parse_pdf_mod.parse_pdf(self.SOLD_PDF)
+        assert row["Fee ($)"] == pytest.approx(14.41)
+
+    def test_real_net_settled_pdf_has_no_fee(self, parse_pdf_mod):
+        if not self.TRADED_PDF.exists():
+            pytest.skip("sample PDF not present")
+        row = parse_pdf_mod.parse_pdf(self.TRADED_PDF)
+        assert row["Fee ($)"] is None
+
 
 # ── Price-block sanity check (warning, not error) ─────────────────────────────
 

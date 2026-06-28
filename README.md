@@ -48,12 +48,12 @@ These can be obtained from e*trade as PDF files. The easiest way is to run `down
 ### Sales and other acquisitions
 The list of sales must be manually created. A sample file is provided in sales/sales.csv. Use the same format.
 
-The file can also carry **acquisitions other than RSU releases** — ESPP purchases, open-market buys, or option exercises — so they join the **same Section 104 pool** as your RSUs (HMRC pools all shares of the same class together, regardless of how they were acquired). Add an optional `Type` column and set it to `Buy` for an acquisition or `Sell` for a disposal; rows with no `Type` are treated as sells. For a `Buy` row the price is the per-share cost basis. For example:
+The file can also carry **acquisitions other than RSU releases** — ESPP purchases, open-market buys, or option exercises — so they join the **same Section 104 pool** as your RSUs (HMRC pools all shares of the same class together, regardless of how they were acquired). Add an optional `Type` column and set it to `Buy` for an acquisition or `Sell` for a disposal; rows with no `Type` are treated as sells. For a `Buy` row the price is the per-share cost basis. An optional `Fee ($)` column records the broker fee on a disposal, an allowable incidental cost of disposal (TCGA 1992 s.38(1)(c)) that is deducted from the gain. For example:
 
 ```
-Date,Type,Shares,Price per share ($)
-2024-03-15,Buy,40,98.50      # ESPP purchase into the pool
-2024-06-01,Sell,100,127.05   # disposal
+Date,Type,Shares,Price per share ($),Fee ($)
+2024-03-15,Buy,40,98.50,         # ESPP purchase into the pool
+2024-06-01,Sell,100,127.05,9.99  # disposal, with a $9.99 broker fee
 ```
 
 In the web GUI the same thing is done with the **Type** dropdown in the "Sales & other acquisitions" table.
@@ -75,7 +75,8 @@ python -m pytest tests/ -v
 E*trade provides all the information relative to vested RSUs: release date, number of shares released, number of shares sold to cover tax, market value per share, etc. The problem is that all of those goodies are encoded in inconvient PDF files. The `parse-stock-releases.py` script is intended to extract the relevant data from the PDF files and print it in a convenient CSV format that is suitable for further processing. If you are here chances are that you came specifically for this tool.
 - CLI that reads one or more release confirmation PDFs.
 - Uses `parse_pdf` and outputs:
-  - `Release Date, Granted, Withheld, Issued, Price per share ($)`
+  - `Release Date, Granted, Withheld, Issued, Price per share ($), Sale price per share ($), Fee ($)`
+  - `Sale price per share ($)` and `Fee ($)` are populated only for sell-to-cover releases (where the broker sold the withheld shares on the market); they are blank for net-settled (`Shares Traded`) releases.
 - Sorted by `Release Date` ascending.
 - **Output:** CSV to stdout.
 
@@ -95,9 +96,10 @@ Merges multiple HMRC monthly exchange-rate CSVs into a single file containing on
   - Merges **Buy (releases)** and **Sell (sales)** into one timeline and sorts by date.
   - Prepends `Type` column: `Buy` or `Sell`.
   - Implements the full HMRC share-identification order: same-day rule → 30-day rule → Section 104 pool.
-  - Inserts `WithholdingSell` rows for shares the broker withheld to cover income tax on RSU vests. Their cost basis is the market value at release (same-day rule); the gain is zero when the shares were net-settled at market value (`Shares Traded`), but a `Shares Sold` release records a separate `Sale price per share` and the difference from market value is a (usually small) chargeable gain/loss.
+  - Inserts `WithholdingSell` rows for shares the broker withheld to cover income tax on RSU vests. Their cost basis is the market value at release (same-day rule); the gain is zero when the shares were net-settled at market value (`Shares Traded`), but a `Shares Sold` release records a separate `Sale price per share` and the difference from market value, **less the broker `Fee`**, is a (usually small) chargeable gain/loss.
+  - Deducts any broker **`Fee`** as an allowable incidental cost of disposal (TCGA 1992 s.38(1)(c)) — both the sell-to-cover fee parsed from release confirmations and an optional `Fee ($)` column on `sales.csv` disposals. The fee is converted to GBP at the disposal-date rate and subtracted from the gain.
   - Adds a `Matching Rule` column indicating which identification rule(s) applied to each disposal.
-  - Adds `Price per share (GBP)` and `Sale price per share (GBP)` as output columns for easier verification.
+  - Adds `Price per share (GBP)`, `Sale price per share (GBP)` and `Fee (GBP)` as output columns for easier verification.
   - The tax-year summary counts **taxable events** (genuine sells plus withholding sells whose sale price differed from market value) and lists every UK tax year in range, including those with no taxable events.
   - Prints a capital-gains summary by UK tax year to stderr after generating the CSV.
 - **Flexible sales headers:** auto-detects typical columns (date, shares, USD price). If your headers differ, adjust the detection list in the script.
