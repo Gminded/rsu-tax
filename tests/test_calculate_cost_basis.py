@@ -309,114 +309,85 @@ class TestRulePriority:
         assert gains[1] == pytest.approx(50 * 12 - 50 * 14)
 
 
-# ── WithholdingSell rows ──────────────────────────────────────────────────────
+# ── Settlement method: net-settle vs sell-to-cover ────────────────────────────
 
-class TestWithholdingSell:
-    def test_withholding_sell_gain_is_zero(self, ccb, mk):
-        events = mk([
-            (ccb.BUY_TYPE,             "2020-01-01", 800, 10.0),
-            (ccb.WITHHOLDING_SELL_TYPE, "2020-01-01", 200, 10.0),
-        ])
-        gains, _, _, _ = ccb.get_gains_and_holdings(events)
-        assert gains[1] == pytest.approx(0.0)
+class TestSellToCover:
+    def _xr(self):
+        # One rate covering the whole span used by these tests.
+        return pd.DataFrame({"Start Date": ["01/01/2019"], "End Date": ["31/12/2026"],
+                             "Currency units per £1": [1.0]})
 
-    def test_withholding_sell_does_not_deplete_pool(self, ccb, mk):
-        """The pool should contain only the Issued (Buy) shares, not the withheld ones."""
-        events = mk([
-            (ccb.BUY_TYPE,             "2020-01-01", 800, 10.0),
-            (ccb.WITHHOLDING_SELL_TYPE, "2020-01-01", 200, 10.0),
-            (ccb.SELL_TYPE,            "2020-06-01", 800, 12.0),
-        ])
-        gains, holdings, _, _ = ccb.get_gains_and_holdings(events)
-        assert gains[2] == pytest.approx(800 * (12 - 10))
-        assert holdings[2] == pytest.approx(0.0)
+    def _rel(self, method, date="2020-06-01", granted=1000, sold=200, issued=800,
+             price=10.0):
+        return pd.DataFrame({
+            "Release Date":           [date],
+            "Settlement Method":      [method],
+            "Granted":                [granted], "Sold": [sold], "Issued": [issued],
+            "Price per share ($)":    [price],
+        })
 
-    def test_withholding_sell_note(self, ccb, mk):
-        events = mk([
-            (ccb.BUY_TYPE,             "2020-01-01", 800, 10.0),
-            (ccb.WITHHOLDING_SELL_TYPE, "2020-01-01", 200, 10.0),
-        ])
-        _, _, notes, _ = ccb.get_gains_and_holdings(events)
-        assert "withholding" in notes[1].lower()
+    def test_net_settle_pools_issued_only_no_disposal(self, ccb):
+        """Withhold Shares: only Issued enters the pool, no disposal, zero gain."""
+        ev = ccb.build_events(self._rel("Withhold Shares"), None, self._xr())
+        assert (ev[ccb.TYPE_LABEL] == ccb.SELL_TYPE).sum() == 0
+        assert ev[ccb.GAINS_LABEL].abs().sum() == pytest.approx(0.0)
+        assert ev.iloc[-1][ccb.OWNED_SHARES_LABEL] == pytest.approx(800.0)
 
-    def _ws_events(self, ccb, mv_gbp, sale_gbp, units=200):
-        """Buy 800 @ mv plus a same-day WithholdingSell of `units` at `sale_gbp`."""
-        return pd.DataFrame([
-            {ccb.TYPE_LABEL: ccb.BUY_TYPE, ccb.DATE_LABEL: "2020-01-01",
-             ccb.DATE_DT: datetime(2020, 1, 1), ccb.GRANTED_LABEL: 800.0,
-             ccb.SOLD_LABEL: 0.0, ccb.ISSUED_LABEL: 800.0,
-             ccb.PRICE_PER_SHARE_GBP_LABEL: mv_gbp,
-             ccb.SALE_PRICE_PER_SHARE_GBP_LABEL: float("nan")},
-            {ccb.TYPE_LABEL: ccb.WITHHOLDING_SELL_TYPE, ccb.DATE_LABEL: "2020-01-01",
-             ccb.DATE_DT: datetime(2020, 1, 1), ccb.GRANTED_LABEL: 0.0,
-             ccb.SOLD_LABEL: float(units), ccb.ISSUED_LABEL: 0.0,
-             ccb.PRICE_PER_SHARE_GBP_LABEL: mv_gbp,
-             ccb.SALE_PRICE_PER_SHARE_GBP_LABEL: sale_gbp},
-        ])
+    def test_sell_to_cover_pools_granted_and_same_day_sale_nets_to_issued(self, ccb):
+        """Sell to cover acquires all Granted; the same-day Orders-feed sale is
+        matched same-day and the pool settles back to Issued."""
+        sales = pd.DataFrame({
+            "Date": ["2020-06-01"], ccb.TYPE_LABEL: [ccb.SELL_TYPE],
+            "Sold": [200.0], "Price per share ($)": [10.0],
+        })
+        ev = ccb.build_events(self._rel("Sell to cover"), sales, self._xr())
+        sell = ev[ev[ccb.TYPE_LABEL] == ccb.SELL_TYPE].iloc[0]
+        # Same-day match against the vest at MV £10 → zero gain.
+        assert sell[ccb.GAINS_LABEL] == pytest.approx(0.0)
+        assert "same-day" in sell[ccb.MATCHING_LABEL]
+        # 1000 acquired − 200 sold = 800 left, i.e. back to Issued.
+        assert ev.iloc[-1][ccb.OWNED_SHARES_LABEL] == pytest.approx(800.0)
 
-    def test_withholding_sell_taxable_when_sale_price_below_market_value(self, ccb):
-        """Sold to cover at a price below release-date market value → allowable loss."""
-        events = self._ws_events(ccb, mv_gbp=10.0, sale_gbp=9.5, units=200)
-        gains, _, notes, _ = ccb.get_gains_and_holdings(events)
-        assert gains[1] == pytest.approx(200 * (9.5 - 10.0))   # -100
-        assert "vs MV" in notes[1]
+    def test_corrected_date_changes_matching_and_gain(self, ccb):
+        """The headline claim: moving the vest date by two days flips a disposal
+        from Section 104 to same-day matching, giving a different gain."""
+        def gain_for(vest_b_date):
+            rel = pd.DataFrame({
+                "Release Date":      ["2020-01-01", vest_b_date],
+                "Settlement Method": ["Withhold Shares", "Sell to cover"],
+                "Granted":           [100, 100], "Sold": [0, 50], "Issued": [100, 50],
+                "Price per share ($)": [10.0, 20.0],
+            })
+            sales = pd.DataFrame({
+                "Date": ["2020-06-08"], ccb.TYPE_LABEL: [ccb.SELL_TYPE],
+                "Sold": [50.0], "Price per share ($)": [25.0],
+            })
+            ev = ccb.build_events(rel, sales, self._xr())
+            return ev[ev[ccb.TYPE_LABEL] == ccb.SELL_TYPE].iloc[0][ccb.GAINS_LABEL]
 
-    def test_withholding_sell_taxable_when_sale_price_above_market_value(self, ccb):
-        """Sold to cover at a price above release-date market value → chargeable gain."""
-        events = self._ws_events(ccb, mv_gbp=10.0, sale_gbp=10.25, units=200)
-        gains, _, _, _ = ccb.get_gains_and_holdings(events)
-        assert gains[1] == pytest.approx(200 * (10.25 - 10.0))   # +50
+        nominal   = gain_for("2020-06-06")  # Sat — sale not same-day → Section 104
+        corrected = gain_for("2020-06-08")  # Mon — same day as the sale → same-day
+        assert nominal != corrected
+        # Same-day: allowable = 50 × £20 (vest MV) → gain 50×(25−20) = £250.
+        assert corrected == pytest.approx(50 * (25 - 20))
+        # Section 104: pool 100@£10 + 100@£20 = £3000/200 = £15 avg → gain 50×25 − 50×15 = £500.
+        assert nominal == pytest.approx(50 * 25 - 50 * 15)
 
-    def test_withholding_sell_zero_gain_when_sale_price_equals_market_value(self, ccb):
-        events = self._ws_events(ccb, mv_gbp=10.0, sale_gbp=10.0, units=200)
-        gains, _, notes, _ = ccb.get_gains_and_holdings(events)
-        assert gains[1] == pytest.approx(0.0)
-        assert "vs MV" not in notes[1]
+    def test_reconciliation_flags_missing_disposal_without_failing(self, ccb):
+        """A sell-to-cover release with no loaded disposal warns (visible gap) but
+        does not raise; the pool is left overstated by the withheld shares."""
+        with pytest.warns(UserWarning, match="no disposal"):
+            ev = ccb.build_events(self._rel("Sell to cover"), None, self._xr())
+        assert ev.iloc[-1][ccb.OWNED_SHARES_LABEL] == pytest.approx(1000.0)
 
-    def test_withholding_sell_does_not_deplete_pool_even_with_sale_price(self, ccb):
-        events = self._ws_events(ccb, mv_gbp=10.0, sale_gbp=9.0, units=200)
-        _, holdings, _, _ = ccb.get_gains_and_holdings(events)
-        # Pool holds only the 800 issued shares; the 200 withheld never enter it.
-        assert holdings[1] == pytest.approx(800 * 10.0)
-
-    def test_main_injects_withholding_sell_rows(self, ccb, tmp_path, capsys):
-        """A release with Sold > 0 should produce a WithholdingSell row in the output."""
-        xr = tmp_path / "xr.csv"
-        xr.write_text(
-            "Country/Territories,Currency,Currency code,"
-            "Currency units per £1,Start Date,End Date\n"
-            "USA,Dollar,USD,1.0000,01/01/2020,31/12/2020\n"
-        )
-        rel = tmp_path / "rel.csv"
-        rel.write_text(
-            "Release Date,Granted,Sold,Issued,Price per share ($)\n"
-            "2020-06-01,1000,200,800,10.00\n"
-        )
-        ccb.main(["prog", "-r", str(rel), "-x", str(xr)])
-        out = capsys.readouterr().out
-        rows = list(csv.DictReader(io.StringIO(out)))
-        types = [r["Type"] for r in rows]
-        assert "WithholdingSell" in types
-        ws = next(r for r in rows if r["Type"] == "WithholdingSell")
-        assert float(ws["Gains / Losses (GBP)"]) == pytest.approx(0.0)
-        assert ws["Sold"] == "200"
-
-    def test_no_withholding_sell_when_sold_is_zero(self, ccb, tmp_path, capsys):
-        xr = tmp_path / "xr.csv"
-        xr.write_text(
-            "Country/Territories,Currency,Currency code,"
-            "Currency units per £1,Start Date,End Date\n"
-            "USA,Dollar,USD,1.0000,01/01/2020,31/12/2020\n"
-        )
-        rel = tmp_path / "rel.csv"
-        rel.write_text(
-            "Release Date,Granted,Sold,Issued,Price per share ($)\n"
-            "2020-06-01,1000,0,1000,10.00\n"
-        )
-        ccb.main(["prog", "-r", str(rel), "-x", str(xr)])
-        out = capsys.readouterr().out
-        rows = list(csv.DictReader(io.StringIO(out)))
-        assert not any(r["Type"] == "WithholdingSell" for r in rows)
+    def test_reconciliation_warns_on_quantity_drift(self, ccb):
+        """Feed disposes fewer shares than were withheld → warn, no failure."""
+        sales = pd.DataFrame({
+            "Date": ["2020-06-01"], ccb.TYPE_LABEL: [ccb.SELL_TYPE],
+            "Sold": [150.0], "Price per share ($)": [10.0],
+        })
+        with pytest.warns(UserWarning, match="overstated"):
+            ccb.build_events(self._rel("Sell to cover"), sales, self._xr())
 
 
 # ── Fees (allowable incidental costs of disposal) ─────────────────────────────
@@ -432,26 +403,6 @@ class TestFees:
         gains, _, notes, _ = ccb.get_gains_and_holdings(events)
         # Without fee: 50*15 - 50*10 = 250; with £20 fee: 230.
         assert gains[1] == pytest.approx(50 * 15 - 50 * 10 - 20.0)
-        assert "fee" in notes[1]
-
-    def test_withholding_sell_fee_creates_allowable_loss(self, ccb):
-        """Sell-to-cover at market value but with a fee → loss equal to the fee."""
-        events = pd.DataFrame([
-            {ccb.TYPE_LABEL: ccb.BUY_TYPE, ccb.DATE_LABEL: "2020-01-01",
-             ccb.DATE_DT: datetime(2020, 1, 1), ccb.GRANTED_LABEL: 800.0,
-             ccb.SOLD_LABEL: 0.0, ccb.ISSUED_LABEL: 800.0,
-             ccb.PRICE_PER_SHARE_GBP_LABEL: 10.0,
-             ccb.SALE_PRICE_PER_SHARE_GBP_LABEL: float("nan"),
-             ccb.FEE_GBP_LABEL: float("nan")},
-            {ccb.TYPE_LABEL: ccb.WITHHOLDING_SELL_TYPE, ccb.DATE_LABEL: "2020-01-01",
-             ccb.DATE_DT: datetime(2020, 1, 1), ccb.GRANTED_LABEL: 0.0,
-             ccb.SOLD_LABEL: 200.0, ccb.ISSUED_LABEL: 0.0,
-             ccb.PRICE_PER_SHARE_GBP_LABEL: 10.0,
-             ccb.SALE_PRICE_PER_SHARE_GBP_LABEL: 10.0,
-             ccb.FEE_GBP_LABEL: 30.0},
-        ])
-        gains, _, notes, _ = ccb.get_gains_and_holdings(events)
-        assert gains[1] == pytest.approx(-30.0)
         assert "fee" in notes[1]
 
     def test_missing_fee_column_is_treated_as_zero(self, ccb, mk):
@@ -473,27 +424,26 @@ class TestFees:
         df = ccb.load_sales(str(p))
         assert df[ccb.FEE_USD_LABEL].iloc[0] == pytest.approx(12.30)
 
-    def test_release_fee_flows_to_withholding_sell_not_pool(self, ccb):
-        """A release Fee attaches to the WithholdingSell disposal; the issued
-        shares enter the pool at market value, undiminished by the fee."""
+    def test_release_fee_is_audit_only_and_does_not_touch_the_pool(self, ccb):
+        """A net-settle release's PDF Fee is audit-only: it neither reduces the
+        pool cost nor creates a disposal (the real disposal fee now arrives via
+        the Orders feed on a Sell row)."""
         rel = pd.DataFrame({
-            "Release Date":             ["2020-06-01"],
-            "Granted":                  [1000], "Sold": [200], "Issued": [800],
-            "Price per share ($)":      [10.0],
-            "Sale price per share ($)": [10.0],
-            "Fee ($)":                  [50.0],
+            "Release Date":        ["2020-06-01"],
+            "Settlement Method":   ["Withhold Shares"],
+            "Granted":             [1000], "Sold": [200], "Issued": [800],
+            "Price per share ($)": [10.0],
+            "Fee ($)":             [50.0],
         })
         xr = pd.DataFrame({"Start Date": ["01/01/2020"], "End Date": ["31/12/2020"],
                            "Currency units per £1": [1.0]})
         ev = ccb.build_events(rel, None, xr)
         buy = ev[ev[ccb.TYPE_LABEL] == ccb.BUY_TYPE].iloc[0]
-        ws  = ev[ev[ccb.TYPE_LABEL] == ccb.WITHHOLDING_SELL_TYPE].iloc[0]
+        assert (ev[ccb.TYPE_LABEL] == ccb.SELL_TYPE).sum() == 0
         # Pool holds 800 issued shares at £10 — the fee did not reduce the cost.
         assert buy[ccb.HOLDINGS_GBP_LABEL] == pytest.approx(800 * 10.0)
         assert pd.isna(buy[ccb.FEE_GBP_LABEL])
-        # The WithholdingSell carries the fee and realises a £50 allowable loss.
-        assert ws[ccb.FEE_GBP_LABEL] == pytest.approx(50.0)
-        assert ws[ccb.GAINS_LABEL] == pytest.approx(-50.0)
+        assert buy[ccb.GAINS_LABEL] == pytest.approx(0.0)
 
     def test_sales_fee_in_pipeline_reduces_gain(self, ccb, tmp_path, capsys):
         xr = tmp_path / "xr.csv"
@@ -823,9 +773,9 @@ class TestMainIntegration:
 
     def test_end_to_end_basic_pipeline(self, ccb, tmp_path, capsys):
         """
-        Scenario:
-          2020-03-01  Buy 900 sh @ £10  (release with 100 withheld → WithholdingSell)
-          2020-07-01  Buy 500 sh @ £12  (no withholding)
+        Scenario (both releases net-settle → only Issued is pooled):
+          2020-03-01  Buy 900 sh @ £10
+          2020-07-01  Buy 500 sh @ £12
           2020-09-01  Sell 200 sh @ £15
 
         Pool before sell: 900*10 + 500*12 = £15 000 across 1 400 sh
@@ -833,7 +783,7 @@ class TestMainIntegration:
         Gain = 200*15 - 2 142.857 = £857.143...
 
         Tax years (GBP/USD = 1.0 throughout):
-          2019/20: WithholdingSell 2020-03-01 → £0
+          2019/20: no disposal → £0 (shown as a zero row)
           2020/21: Sell 2020-09-01 → £857.14...
         """
         xr = self._write(tmp_path / "xr.csv",
@@ -857,15 +807,10 @@ class TestMainIntegration:
         rows = list(csv.DictReader(io.StringIO(out)))
         types = [r["Type"] for r in rows]
 
-        # All three event types present
+        # Net-settle releases produce Buys only; the disposal is the manual Sell.
         assert "Buy" in types
-        assert "WithholdingSell" in types
         assert "Sell" in types
-
-        # WithholdingSell gain is zero
-        ws = next(r for r in rows if r["Type"] == "WithholdingSell")
-        assert float(ws["Gains / Losses (GBP)"]) == pytest.approx(0.0)
-        assert "tax withholding" in ws["Matching Rule"]
+        assert "WithholdingSell" not in types
 
         # Sell gain matches manual calculation
         sell = next(r for r in rows if r["Type"] == "Sell")
@@ -914,24 +859,29 @@ class TestMainIntegration:
         assert float(sell["Gains / Losses (GBP)"]) == pytest.approx(50 * 12 - 50 * 14)
         assert "30-day" in sell["Matching Rule"]
 
-    def test_withholding_sale_price_difference_produces_taxable_gain(self, ccb, tmp_path, capsys):
-        """A 'Shares Sold' release whose sale price differs from market value is taxable."""
+    def test_sell_to_cover_disposal_from_orders_feed(self, ccb, tmp_path, capsys):
+        """A 'Sell to cover' release pools Granted; the disposal of the withheld
+        shares arrives via the Orders/sales feed and is matched normally."""
         xr = self._write(tmp_path / "xr.csv",
             "Country/Territories,Currency,Currency code,"
             "Currency units per £1,Start Date,End Date\n"
             "USA,Dollar,USD,1.0000,01/01/2020,31/12/2020\n"
         )
         rel = self._write(tmp_path / "rel.csv",
-            "Release Date,Granted,Sold,Issued,Price per share ($),Sale price per share ($)\n"
-            "2020-06-01,1000,200,800,10.00,9.50\n"
+            "Release Date,Settlement Method,Granted,Sold,Issued,Price per share ($)\n"
+            "2020-06-01,Sell to cover,1000,200,800,10.00\n"
         )
-        ccb.main(["prog", "-r", rel, "-x", xr])
+        # The broker sold the 200 withheld shares the next trading day at £9.50.
+        orders = self._write(tmp_path / "orders.csv",
+            "Date,Type,Shares,Price per share ($)\n"
+            "2020-06-02,Sell Restricted Stock,200,9.50\n"
+        )
+        ccb.main(["prog", "-r", rel, "-x", xr, "-O", orders])
         out, err = capsys.readouterr()
         rows = list(csv.DictReader(io.StringIO(out)))
-        ws = next(r for r in rows if r["Type"] == "WithholdingSell")
-        assert float(ws["Gains / Losses (GBP)"]) == pytest.approx(200 * (9.50 - 10.00))
-        assert ws["Sale price per share (GBP)"] == "9.5000"
-        # 1 taxable event (the withholding sell) in 2020/21
+        sell = next(r for r in rows if r["Type"] == "Sell")
+        # Section 104: pool 1000@£10; sell 200 → allowable 200×£10 → gain 200×(9.5−10).
+        assert float(sell["Gains / Losses (GBP)"]) == pytest.approx(200 * (9.50 - 10.00))
         assert "2020/21" in err
 
     def test_summary_includes_tax_years_without_taxable_events(self, ccb, tmp_path, capsys):
@@ -1016,15 +966,13 @@ class TestBuildEvents:
         cols = [ccb.GAINS_LABEL, ccb.HOLDINGS_GBP_LABEL, ccb.OWNED_SHARES_LABEL]
         pd.testing.assert_frame_equal(ev_release[cols], ev_date[cols])
 
-    def test_injects_withholding_sell_and_computes_pool_sale(self, ccb):
+    def test_computes_pool_sale(self, ccb):
         sales = pd.DataFrame({
             "Date":                ["2020-09-01"],
             "Sold":                [200.0],
             "Price per share ($)": [15.0],
         })
         ev = ccb.build_events(self._releases("Release Date"), sales, self._xr())
-        types = list(ev[ccb.TYPE_LABEL])
-        assert ccb.WITHHOLDING_SELL_TYPE in types
         sell = ev[ev[ccb.TYPE_LABEL] == ccb.SELL_TYPE].iloc[0]
         # Pool: 900*10 + 500*12 = 15000 over 1400 sh; sell 200 from pool.
         # Reported gains are quantised to pennies (£857.142857… → £857.14).
@@ -1076,8 +1024,8 @@ class TestBuildEvents:
         sell = ev[ev[ccb.TYPE_LABEL] == ccb.SELL_TYPE].iloc[0]
         # Sell 100 from the pool: allowable = 200 sh avg £15 × 100 = £1500.
         assert sell[ccb.GAINS_LABEL] == pytest.approx(100 * 30 - 1500)
-        # The generic Buy is an acquisition, not a disposal — no withholding sell.
-        assert (ev[ccb.TYPE_LABEL] == ccb.WITHHOLDING_SELL_TYPE).sum() == 0
+        # The generic Buy is an acquisition, not a disposal.
+        assert (ev[ccb.TYPE_LABEL] == ccb.SELL_TYPE).sum() == 1
 
     def test_generic_buy_same_day_match(self, ccb):
         """A Buy and Sell on the same day match same-day, bypassing the pool."""

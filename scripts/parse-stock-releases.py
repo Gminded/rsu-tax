@@ -32,7 +32,8 @@ def main(argv: List[str]) -> int:
                         f"first trading day (default: {DEFAULT_EXCHANGE})")
     args = p.parse_args(argv[1:])
 
-    fieldnames = ["Release Date", "Nominal Release Date", "Granted", "Sold", "Issued",
+    fieldnames = ["Release Date", "Nominal Release Date", "Settlement Method",
+                  "Granted", "Sold", "Issued",
                   "Price per share ($)", "Sale price per share ($)", "Fee ($)"]
     writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
     writer.writeheader()

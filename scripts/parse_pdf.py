@@ -139,6 +139,20 @@ def parse_pdf(pdf_path: Path, exchange: str = DEFAULT_EXCHANGE) -> Dict[str, Opt
             stacklevel=2,
         )
 
+    # Settlement method is read from the share-distribution label the PDF uses:
+    #   "Shares Sold"   → Sell to cover (all Granted acquired, some sold on market)
+    #   "Shares Traded" → Withhold Shares (net settlement; only Issued acquired)
+    # This is the authoritative signal for how the vest settled the tax due.
+    text_all = " ".join(b["text"] for b in boxes)
+    if "Shares Sold" in text_all:
+        settlement_method = "Sell to cover"
+    elif "Shares Traded" in text_all:
+        settlement_method = "Withhold Shares"
+    else:
+        # Fallback when the label cell is not isolated: a market Sale Price Per
+        # Share is recorded only when the withheld shares were actually sold.
+        settlement_method = "Sell to cover" if sale is not None else "Withhold Shares"
+
     # Stock distribution: Award Shares / (Shares Traded|Sold) / Shares Issued
     block_dist = (_neighbor_block_right(boxes, "Award Shares") or
                   _neighbor_block_right(boxes, "Shares Traded") or
@@ -227,6 +241,7 @@ def parse_pdf(pdf_path: Path, exchange: str = DEFAULT_EXCHANGE) -> Dict[str, Opt
     return {
         "Release Date": corrected_date,
         "Nominal Release Date": date_out,
+        "Settlement Method": settlement_method,
         "Granted": int(round(grant)) if grant is not None else None,
         "Sold": withheld if withheld is not None else None,
         "Issued": int(round(issued)) if issued is not None else None,

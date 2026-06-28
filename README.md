@@ -75,9 +75,10 @@ python -m pytest tests/ -v
 E*trade provides all the information relative to vested RSUs: release date, number of shares released, number of shares sold to cover tax, market value per share, etc. The problem is that all of those goodies are encoded in inconvient PDF files. The `parse-stock-releases.py` script is intended to extract the relevant data from the PDF files and print it in a convenient CSV format that is suitable for further processing. If you are here chances are that you came specifically for this tool.
 - CLI that reads one or more release confirmation PDFs.
 - Uses `parse_pdf` and outputs:
-  - `Release Date, Nominal Release Date, Granted, Sold, Issued, Price per share ($), Sale price per share ($), Fee ($)`
+  - `Release Date, Nominal Release Date, Settlement Method, Granted, Sold, Issued, Price per share ($), Sale price per share ($), Fee ($)`
   - `Release Date` is the corrected first trading day on/after the PDF's nominal vesting date (weekends and market holidays rolled forward); `Nominal Release Date` is the raw PDF value, kept for audit. Use `--exchange CODE` to pick the market calendar (default `XNAS`).
-  - `Sale price per share ($)` and `Fee ($)` are populated only for sell-to-cover releases (where the broker sold the withheld shares on the market); they are blank for net-settled (`Shares Traded`) releases.
+  - `Settlement Method` is `Sell to cover` (PDF label `Shares Sold` — all `Granted` shares are acquired and the withheld ones sold on the market) or `Withhold Shares` (label `Shares Traded` — net settlement; only `Issued` shares are acquired, no market sale). It decides how many shares enter the Section 104 pool.
+  - `Sale price per share ($)` and `Fee ($)` are audit-only: the actual disposal of sell-to-cover shares now comes from the Orders feed (`sales/orders.csv`, see `download_etrade.py`), not these columns.
 - Sorted by `Release Date` ascending.
 - **Output:** CSV to stdout.
 

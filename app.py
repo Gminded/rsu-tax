@@ -30,8 +30,9 @@ ccb = _load_module("calculate-cost-basis.py")
 _ROOT      = Path(__file__).parent
 _EXRATES_DIR = _ROOT / "monthly-exchange-rates-by-hmrc"
 _SALES_CSV   = _ROOT / "sales" / "sales.csv"
+_ORDERS_CSV  = _ROOT / "sales" / "orders.csv"
 
-_RELEASE_COLS = ["Release Date", "Nominal Release Date",
+_RELEASE_COLS = ["Release Date", "Nominal Release Date", "Settlement Method",
                  "Granted", "Sold", "Issued",
                  "Price per share ($)", "Sale price per share ($)", "Fee ($)",
                  "Award Date", "Award Number"]
@@ -184,6 +185,12 @@ def _run_calculation(releases_df, sales_df, exrates_df) -> pd.DataFrame:
             sales[ccb.FEE_USD_LABEL] = pd.to_numeric(
                 valid_sales["Fee ($)"], errors="coerce"
             ).abs().values
+
+    # The downloaded Orders feed is the primary source of E*Trade disposals
+    # (sell-to-cover + manual sales); concatenate it with the editor's sales.
+    if _ORDERS_CSV.exists():
+        orders = ccb.load_sales(str(_ORDERS_CSV))
+        sales = orders if sales is None else pd.concat([orders, sales], ignore_index=True)
 
     return ccb.build_events(releases_df, sales, exrates_df)
 
@@ -532,15 +539,13 @@ if st.session_state.results is not None:
     TRANSFERRED_LABEL = "Transferred shares"
 
     display = events.copy()
-    # Show the human-readable settlement method (Withholding Sell vs Sell to
-    # cover). The distinction is defined once in the engine, not re-derived here.
-    display[ccb.TYPE_LABEL] = events.apply(ccb.event_type_label, axis=1)
-    # Each event moves shares one way only: a Buy acquires Granted shares; a Sell
-    # or WithholdingSell disposes of Sold shares. Collapse the two mutually
-    # exclusive columns into one.
+    # Each event moves shares one way only: a Buy acquires shares into the pool
+    # (Issued for net-settle, Granted for sell-to-cover — both already resolved
+    # onto ISSUED_LABEL by the engine); a Sell disposes of Sold shares. Collapse
+    # the two mutually exclusive columns into one.
     is_buy = events[ccb.TYPE_LABEL] == ccb.BUY_TYPE
     display[TRANSFERRED_LABEL] = events[ccb.SOLD_LABEL].where(
-        ~is_buy, events[ccb.GRANTED_LABEL]
+        ~is_buy, events[ccb.ISSUED_LABEL]
     )
 
     output_cols = [

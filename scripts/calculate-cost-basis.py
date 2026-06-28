@@ -14,7 +14,7 @@
 # along with this program; if not, see
 # <https://www.gnu.org/licenses/>.
 
-import sys, argparse, math
+import sys, argparse, math, warnings
 import pandas as pd
 from datetime import datetime, timedelta
 
@@ -24,6 +24,7 @@ DATE_DT                   = "Date_dt"
 GRANTED_LABEL             = "Granted"
 SOLD_LABEL                = "Sold"
 ISSUED_LABEL              = "Issued"
+SETTLEMENT_METHOD_LABEL   = "Settlement Method"
 START_DATE_LABEL          = "Start Date"
 END_DATE_LABEL            = "End Date"
 RELEASE_DATE_LABEL        = "Release Date"
@@ -43,31 +44,13 @@ MATCHING_LABEL            = "Matching Rule"
 # Type values
 BUY_TYPE              = "Buy"
 SELL_TYPE             = "Sell"
-WITHHOLDING_SELL_TYPE = "WithholdingSell"
 
-# Human-readable labels for the two ways a vest can settle the tax due on it.
-# Both are carried internally as WITHHOLDING_SELL_TYPE — they differ only in how
-# the withheld shares were settled, which is recorded by the presence of a
-# distinct broker sale price (see _is_sell_to_cover).
-WITHHOLDING_LABEL   = "Withholding Sell"   # net-settled at market value
-SELL_TO_COVER_LABEL = "Sell to cover"      # withheld shares sold on the market
-
-
-def _is_sell_to_cover(row) -> bool:
-    """True when a WithholdingSell disposed of the withheld shares on the open
-    market (a distinct broker sale price was recorded) rather than net-settling
-    at market value."""
-    sale = row.get(SALE_PRICE_PER_SHARE_USD_LABEL)
-    return sale is not None and not (isinstance(sale, float) and math.isnan(sale))
-
-
-def event_type_label(row) -> str:
-    """Map an event row's machine Type to a human-readable label, distinguishing
-    a net-settled Withholding Sell from a Sell to cover.  Shared by the CLI and
-    GUI so the distinction is defined once and never re-derived per interface."""
-    if row[TYPE_LABEL] == WITHHOLDING_SELL_TYPE:
-        return SELL_TO_COVER_LABEL if _is_sell_to_cover(row) else WITHHOLDING_LABEL
-    return row[TYPE_LABEL]
+# How a vest settled the income tax due on it, read from the PDF label (see
+# parse_pdf).  Sell-to-cover acquires every Granted share into the pool and the
+# disposal of the withheld shares arrives separately via the Orders feed; net
+# settlement acquires only the Issued shares and makes no market sale.
+WITHHOLD_SHARES_METHOD = "Withhold Shares"
+SELL_TO_COVER_METHOD   = "Sell to cover"
 
 # FX provenance.  HMRC requires that USD→GBP conversions use a single, consistent
 # source throughout a return; this project defaults to HMRC's published monthly
@@ -191,9 +174,8 @@ def get_gains_and_holdings(events: pd.DataFrame):
     entry per row in events.
 
     Buy rows enter the Section 104 pool to the extent they are not consumed by
-    same-day or 30-day matching against a Sell.  WithholdingSell rows are
-    informational (gain = 0, pool unchanged).  pool_units_after is the number of
-    shares still held in the Section 104 pool immediately after each event.
+    same-day or 30-day matching against a Sell.  pool_units_after is the number
+    of shares still held in the Section 104 pool immediately after each event.
     """
     records = events.reset_index(drop=True).to_dict("records")
     n = len(records)
@@ -298,32 +280,6 @@ def get_gains_and_holdings(events: pd.DataFrame):
             else:
                 matching_notes.append("")
 
-        elif typ == WITHHOLDING_SELL_TYPE:
-            # Shares the broker sold to cover income tax on the vest.  These were
-            # never in the Section 104 pool: under the same-day rule their cost
-            # basis is the acquisition cost (market value at release = price_gbp),
-            # and the proceeds are the broker's actual sale price, less any
-            # broker fee on that sale (an allowable incidental cost of disposal).
-            # When the shares were net-settled at market value (no separate sale
-            # price and no fee) the gain is zero.
-            units    = require_float(rec[SOLD_LABEL], SOLD_LABEL, rec[DATE_LABEL])
-            sale_gbp = rec.get(SALE_PRICE_PER_SHARE_GBP_LABEL)
-            if sale_gbp is None or (isinstance(sale_gbp, float) and math.isnan(sale_gbp)):
-                sale_gbp = price_gbp
-            fee  = _fee_gbp(rec)
-            gain = (sale_gbp - price_gbp) * units - fee
-            gains.append(gain)
-            pool_costs_out.append(pool_cost)
-            pool_units_out.append(pool_units)
-            if abs(gain) > 1e-9:
-                note = (f"same-day rule (tax withholding); sold {units:.0f} sh @ "
-                        f"£{sale_gbp:.4f} vs MV £{price_gbp:.4f}")
-                if fee > 1e-9:
-                    note += f"; less £{fee:.2f} fee"
-                matching_notes.append(note)
-            else:
-                matching_notes.append("same-day rule (tax withholding)")
-
         else:  # SELL_TYPE
             if i not in sell_info:
                 raise ValueError(
@@ -381,11 +337,9 @@ def _tax_year_label(dt: datetime) -> str:
 
 
 def _taxable_disposals(events: pd.DataFrame) -> pd.DataFrame:
-    """Chargeable disposals: every Sell plus any WithholdingSell with a gain/loss."""
-    is_sell       = events[TYPE_LABEL] == SELL_TYPE
-    is_taxable_ws = ((events[TYPE_LABEL] == WITHHOLDING_SELL_TYPE) &
-                     (events[GAINS_LABEL].abs() > 1e-9))
-    return events[is_sell | is_taxable_ws].copy()
+    """Chargeable disposals: every Sell (sell-to-cover and manual alike, all
+    sourced from the sales/Orders feed)."""
+    return events[events[TYPE_LABEL] == SELL_TYPE].copy()
 
 
 def capital_loss_claims(events: pd.DataFrame, today: datetime = None) -> list[dict]:
@@ -427,12 +381,9 @@ def print_tax_year_summary(events: pd.DataFrame) -> None:
     if events.empty:
         return
 
-    # Taxable events are chargeable disposals:
-    #   * every genuine Sell, and
-    #   * a WithholdingSell only when the broker's sale price differed from the
-    #     market value at release, so it realised a (small) gain or loss.  A
-    #     WithholdingSell sold/net-settled at market value has gain = 0 and is
-    #     not a taxable event.
+    # Taxable events are chargeable disposals: every Sell (sell-to-cover and
+    # manual sales alike come through the sales/Orders feed and are matched by
+    # the normal HS284 rules).
     taxable = _taxable_disposals(events)
 
     # Show every UK tax year spanned by the data (continuous, no gaps), so a year
@@ -491,11 +442,11 @@ def print_events(events: pd.DataFrame) -> None:
 
 
 # ---------- Event assembly (shared by CLI and GUI) ----------
-# Column set every event row carries before matching.  Buys, Sells and
-# WithholdingSells are all normalised to this shape so they can be concatenated.
+# Column set every event row carries before matching.  Buys and Sells are both
+# normalised to this shape so they can be concatenated.
 _EVENT_COLS = [
     TYPE_LABEL, DATE_LABEL, DATE_DT,
-    GRANTED_LABEL, SOLD_LABEL, ISSUED_LABEL,
+    GRANTED_LABEL, SOLD_LABEL, ISSUED_LABEL, SETTLEMENT_METHOD_LABEL,
     PRICE_PER_SHARE_USD_LABEL, SALE_PRICE_PER_SHARE_USD_LABEL, FEE_USD_LABEL,
     GBP_USD_LABEL,
 ]
@@ -517,13 +468,24 @@ def _normalise_releases(releases: pd.DataFrame) -> pd.DataFrame:
 
     rel[DATE_DT] = rel[DATE_LABEL].apply(parse_date_ymd)
 
-    # Sale price per share is present only for releases where the broker sold the
-    # withheld shares on the market (rather than net-settling at market value).
+    # Settlement method decides how many shares are acquired into the Section 104
+    # pool.  Sell-to-cover acquires every Granted share (the withheld ones are
+    # then disposed of via the Orders feed); net settlement acquires only Issued.
+    # Older releases without the field default to net settlement (pool Issued),
+    # matching the pre-method behaviour.
+    if SETTLEMENT_METHOD_LABEL not in rel.columns:
+        rel[SETTLEMENT_METHOD_LABEL] = WITHHOLD_SHARES_METHOD
+    rel[SETTLEMENT_METHOD_LABEL] = rel[SETTLEMENT_METHOD_LABEL].fillna(WITHHOLD_SHARES_METHOD)
+    is_stc = rel[SETTLEMENT_METHOD_LABEL] == SELL_TO_COVER_METHOD
+    # The pool consumes ISSUED_LABEL, so set it to the acquired count per method.
+    rel[ISSUED_LABEL] = rel[ISSUED_LABEL].where(~is_stc, rel[GRANTED_LABEL])
+
+    # Sale price / fee from the PDF are audit-only now: the actual disposal of the
+    # withheld shares comes through the Orders feed with its own price and fee.
+    # Kept (not dropped) so parsed-releases.csv stays traceable.
+    # ponytail: kept Sale-price/Fee columns as audit-only — dropping is churn for no gain.
     if SALE_PRICE_PER_SHARE_USD_LABEL not in rel.columns:
         rel[SALE_PRICE_PER_SHARE_USD_LABEL] = float("nan")
-
-    # Fee is present only on sell-to-cover releases (the broker fee on selling
-    # the withheld shares); it attaches to the WithholdingSell, not the pool.
     if FEE_USD_LABEL not in rel.columns:
         rel[FEE_USD_LABEL] = float("nan")
 
@@ -541,32 +503,43 @@ def _normalise_exrates(exrates: pd.DataFrame) -> pd.DataFrame:
     return xr
 
 
-def _withholding_sell_rows(rel: pd.DataFrame) -> list[dict]:
-    """One WithholdingSell row per release with shares withheld to cover tax."""
-    ws_rows = []
-    for _, row in rel.iterrows():
-        withheld = require_float(row[SOLD_LABEL], SOLD_LABEL, row[DATE_LABEL])
-        if withheld <= 0:
-            continue
-        # Leave the sale price absent (NaN) for net-settled releases rather than
-        # back-filling it with the market value.  The gain calculation already
-        # treats a missing sale price as a zero-gain net-settlement, and keeping
-        # it absent lets _is_sell_to_cover tell the two methods apart for display.
-        ws_rows.append({
-            TYPE_LABEL:                     WITHHOLDING_SELL_TYPE,
-            DATE_LABEL:                     row[DATE_LABEL],
-            DATE_DT:                        row[DATE_DT],
-            GRANTED_LABEL:                  0.0,
-            SOLD_LABEL:                     withheld,
-            ISSUED_LABEL:                   0.0,
-            PRICE_PER_SHARE_USD_LABEL:      row[PRICE_PER_SHARE_USD_LABEL],
-            SALE_PRICE_PER_SHARE_USD_LABEL: row[SALE_PRICE_PER_SHARE_USD_LABEL],
-            # The broker fee on the sell-to-cover sale travels with the disposal
-            # (the WithholdingSell), where it is deducted from the gain.
-            FEE_USD_LABEL:                  row.get(FEE_USD_LABEL, float("nan")),
-            GBP_USD_LABEL:                  row[GBP_USD_LABEL],
-        })
-    return ws_rows
+def sell_to_cover_warnings(events: pd.DataFrame) -> list[str]:
+    """Warn-only reconciliation for sell-to-cover releases.
+
+    Each sell-to-cover vest pools every Granted share, so its withheld shares
+    must be disposed of via the sales/Orders feed for the pool to settle back to
+    Issued.  Flag any sell-to-cover release with no disposal within 30 days (a
+    visible gap — typically pre-history the feed cannot reach, to be added to
+    sales/sales.csv), and warn if the feed disposes of fewer shares overall than
+    were withheld.  Never raises — the figures may legitimately differ.
+    # ponytail: warn-only reconciliation; no auto-correction.
+    """
+    warns: list[str] = []
+    buys  = events[events[TYPE_LABEL] == BUY_TYPE]
+    sells = events[events[TYPE_LABEL] == SELL_TYPE]
+    if SETTLEMENT_METHOD_LABEL not in events.columns:
+        return warns
+    stc = buys[buys[SETTLEMENT_METHOD_LABEL] == SELL_TO_COVER_METHOD]
+
+    for _, r in stc.iterrows():
+        window = sells[(sells[DATE_DT] >= r[DATE_DT]) &
+                       (sells[DATE_DT] <= r[DATE_DT] + timedelta(days=30))]
+        if window.empty:
+            warns.append(
+                f"Sell-to-cover release {r[DATE_LABEL]} withheld {r[SOLD_LABEL]:.0f} "
+                f"sh but no disposal within 30 days is loaded — add the sale to "
+                f"sales/sales.csv (the Orders feed may not reach back this far)."
+            )
+
+    withheld = stc[SOLD_LABEL].sum()
+    disposed = sells[SOLD_LABEL].sum()
+    if disposed + 1e-9 < withheld:
+        warns.append(
+            f"Sell-to-cover withheld {withheld:.0f} sh in total but only "
+            f"{disposed:.0f} sh are disposed across all sales; the Section 104 "
+            f"pool will be overstated by the {withheld - disposed:.0f} sh difference."
+        )
+    return warns
 
 
 def build_events(releases: pd.DataFrame,
@@ -574,9 +547,8 @@ def build_events(releases: pd.DataFrame,
                  exrates: pd.DataFrame) -> pd.DataFrame:
     """
     Assemble the full event timeline and run the HS284 matching, returning a
-    DataFrame with one row per Buy / Sell / WithholdingSell and every derived
-    column (GBP prices, gains, Section 104 holdings, owned shares, average cost
-    and matching notes).
+    DataFrame with one row per Buy / Sell and every derived column (GBP prices,
+    gains, Section 104 holdings, owned shares, average cost and matching notes).
 
     This is the single source of truth shared by the CLI (`main`) and the
     Streamlit GUI, so the two cannot drift apart.
@@ -591,12 +563,10 @@ def build_events(releases: pd.DataFrame,
     rel[GBP_USD_LABEL] = attach_rate(rel[DATE_DT], xr)
     rel = rel[_EVENT_COLS]
 
-    ws_rows = _withholding_sell_rows(rel)
-
-    # A release becomes a Buy (issued shares into the pool) plus, where shares
-    # were withheld, a WithholdingSell.  The fee belongs to that disposal, which
-    # has now captured it in ws_rows, so clear it from the Buy rows — the issued
-    # shares were not sold and bear no disposal cost.
+    # A release is a pure acquisition (a Buy into the pool); the disposal of any
+    # withheld shares comes through the sales/Orders feed, not the release.  The
+    # PDF fee is the broker fee on that disposal, so it does not belong on the
+    # acquisition — clear it from the Buy rows.
     rel = rel.copy()
     rel[FEE_USD_LABEL] = float("nan")
 
@@ -627,17 +597,16 @@ def build_events(releases: pd.DataFrame,
         if FEE_USD_LABEL not in s.columns:
             s[FEE_USD_LABEL] = float("nan")
         s[FEE_USD_LABEL] = s[FEE_USD_LABEL].where(~is_buy, float("nan"))
+        # Sales carry no settlement method (that is a property of a vest).
+        s[SETTLEMENT_METHOD_LABEL] = float("nan")
         s = s[_EVENT_COLS]
         events_parts.append(s)
 
-    if ws_rows:
-        events_parts.append(pd.DataFrame(ws_rows))
-
     events = pd.concat(events_parts, ignore_index=True)
 
-    # Sort: date first; within a date, Buys before WithholdingSells before Sells
-    # so same-day matching sees the acquisition before any disposal.
-    type_order = {BUY_TYPE: 0, WITHHOLDING_SELL_TYPE: 1, SELL_TYPE: 2}
+    # Sort: date first; within a date, Buys before Sells so same-day matching
+    # sees the acquisition before any disposal.
+    type_order = {BUY_TYPE: 0, SELL_TYPE: 1}
     events["_sort_type"] = events[TYPE_LABEL].map(type_order).fillna(9)
     events = (events
               .sort_values([DATE_DT, "_sort_type"], kind="stable")
@@ -674,6 +643,9 @@ def build_events(releases: pd.DataFrame,
         owned_series > 1e-9
     ) / owned_series.where(owned_series > 1e-9)
 
+    for msg in sell_to_cover_warnings(events):
+        warnings.warn(msg, stacklevel=2)
+
     return events
 
 
@@ -685,11 +657,18 @@ def main(argv):
     p.add_argument("--exrates",  "-x", required=True,
                    help="Exchange rates CSV (Start/End Date in DD/MM/YYYY)")
     p.add_argument("--sales",    "-s", help="Sales CSV (optional)")
+    p.add_argument("--orders",   "-O", help="Orders CSV from download_etrade.py "
+                   "(optional); the primary source of E*Trade disposals")
     args = p.parse_args(argv[1:])
 
     rel   = pd.read_csv(args.releases)
     xr    = pd.read_csv(args.exrates)
-    sales = load_sales(args.sales) if args.sales else None
+
+    # Disposals come from the Orders feed (primary) and the manual sales file
+    # (supplement for anything the feed cannot reach).  Both load through the
+    # same path and are concatenated; either may be absent.
+    parts = [load_sales(f) for f in (args.orders, args.sales) if f]
+    sales = pd.concat(parts, ignore_index=True) if parts else None
 
     events = build_events(rel, sales, xr)
 

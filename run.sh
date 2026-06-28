@@ -6,6 +6,7 @@ OUT_DIR=out
 RELEASE_CONFIRMATIONS=release-confirmations
 EXCHANGE_RATES=monthly-exchange-rates-by-hmrc
 SALES=sales/sales.csv
+ORDERS=sales/orders.csv
 EXCHANGE=XNAS
 
 # Parse arguments
@@ -60,5 +61,12 @@ echo $(which python3)
 
 python3 scripts/parse-stock-releases.py --exchange "$EXCHANGE" $RELEASE_CONFIRMATIONS/*.pdf > $OUT_DIR/parsed-releases.csv
 python3 scripts/combine.py $EXCHANGE_RATES/*.csv > $OUT_DIR/exchange-rates.csv
-python3 scripts/calculate-cost-basis.py -r $OUT_DIR/parsed-releases.csv -x $OUT_DIR/exchange-rates.csv -s $SALES > $OUT_DIR/cost-basis.csv
+# orders.csv (sell-to-cover + manual E*Trade disposals from download_etrade.py)
+# is the primary disposal source; include it only if it has been downloaded.
+ORDERS_ARG=()
+if [ -f "$ORDERS" ]; then
+    ORDERS_ARG=(-O "$ORDERS")
+fi
+
+python3 scripts/calculate-cost-basis.py -r $OUT_DIR/parsed-releases.csv -x $OUT_DIR/exchange-rates.csv -s $SALES "${ORDERS_ARG[@]}" > $OUT_DIR/cost-basis.csv
 
