@@ -59,7 +59,7 @@ Date,Type,Shares,Price per share ($),Fee ($)
 In the web GUI the same thing is done with the **Type** dropdown in the "Sales & other acquisitions" table.
 
 ### Exchange Rates
-The monthly exchange rates from HMRC that cover the period from January 2018 to November 2025 (or a later month if I remember to update this project) are already included. You can get more from https://www.trade-tariff.service.gov.uk/exchange_rates, or run `download-rates.sh` to download them automatically. Note that there exist no "official" exchange rates as such. HMRC accepts other sources too, e.g. your own bank or the Bank of England. However you must use the same source consistently throughout your calculations.
+The monthly exchange rates from HMRC that cover the period from January 2018 to November 2025 (or a later month if I remember to update this project) are already included. You can get more from https://www.trade-tariff.service.gov.uk/exchange_rates, or run `python scripts/download_rates.py 2018` to download them automatically (a month range, e.g. `2018 2026-4`, also works). Note that there exist no "official" exchange rates as such. HMRC accepts other sources too, e.g. your own bank or the Bank of England. However you must use the same source consistently throughout your calculations.
 
 ## Tests
 
