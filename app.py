@@ -13,6 +13,8 @@ sys.path.insert(0, str(_BIN))
 
 from parse_pdf import parse_pdf      # noqa: E402
 from combine import get_usd_row      # noqa: E402
+from trading_calendar import DEFAULT_EXCHANGE  # noqa: E402
+import exchange_calendars as xcals   # noqa: E402
 
 def _load_module(filename: str):
     path = _BIN / filename
@@ -29,8 +31,10 @@ _ROOT      = Path(__file__).parent
 _EXRATES_DIR = _ROOT / "monthly-exchange-rates-by-hmrc"
 _SALES_CSV   = _ROOT / "sales" / "sales.csv"
 
-_RELEASE_COLS = ["Release Date", "Granted", "Sold", "Issued", "Price per share ($)",
-                 "Sale price per share ($)", "Fee ($)", "Award Date", "Award Number"]
+_RELEASE_COLS = ["Release Date", "Nominal Release Date",
+                 "Granted", "Sold", "Issued",
+                 "Price per share ($)", "Sale price per share ($)", "Fee ($)",
+                 "Award Date", "Award Number"]
 # A release is uniquely identified by its grant (Award Number) and the date it
 # vested. Two different grants can vest on the same date with identical share
 # counts and price, so we must NOT deduplicate on (Release Date, Granted) alone.
@@ -100,7 +104,7 @@ def _load_default_exrates() -> pd.DataFrame | None:
 
 def _parse_pdf_path(path: Path) -> dict:
     """Parse a single release-confirmation PDF into a releases-table row."""
-    result = parse_pdf(path)
+    result = parse_pdf(path, exchange=st.session_state.get("exchange", DEFAULT_EXCHANGE))
     return {k: result.get(k) for k in _RELEASE_COLS}
 
 
@@ -200,6 +204,16 @@ with st.expander(
     f"RSU Releases — {releases_count} loaded" if releases_count else "RSU Releases",
     expanded=(releases_count == 0),
 ):
+    _cal_names = sorted(xcals.get_calendar_names())
+    st.selectbox(
+        "Market calendar (rolls each nominal release date to the first trading day)",
+        _cal_names,
+        index=_cal_names.index(DEFAULT_EXCHANGE),
+        key="exchange",
+        help="Default XNAS (NASDAQ). Pick the exchange the stock trades on so "
+             "weekends/holidays roll to a real trading day.",
+    )
+
     uploaded_pdfs = st.file_uploader(
         "Upload e*trade release confirmation PDFs",
         type="pdf",

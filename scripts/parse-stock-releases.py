@@ -16,18 +16,23 @@
 
 import sys
 import csv
+import argparse
 from pathlib import Path
 from datetime import date
 from typing import List
 
 from parse_pdf import parse_pdf
+from trading_calendar import DEFAULT_EXCHANGE
 
 def main(argv: List[str]) -> int:
-    if len(argv) < 2:
-        sys.stderr.write("Usage: parse_stock_release_pdfs.py <file1.pdf> [<file2.pdf> ...]\n")
-        return 2
+    p = argparse.ArgumentParser(description="Parse stock release confirmation PDFs to CSV.")
+    p.add_argument("pdfs", nargs="+", help="Confirmation PDF file(s)")
+    p.add_argument("--exchange", default=DEFAULT_EXCHANGE,
+                   help=f"Market calendar for rolling nominal release dates to the "
+                        f"first trading day (default: {DEFAULT_EXCHANGE})")
+    args = p.parse_args(argv[1:])
 
-    fieldnames = ["Release Date", "Granted", "Sold", "Issued",
+    fieldnames = ["Release Date", "Nominal Release Date", "Granted", "Sold", "Issued",
                   "Price per share ($)", "Sale price per share ($)", "Fee ($)"]
     writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
     writer.writeheader()
@@ -35,9 +40,9 @@ def main(argv: List[str]) -> int:
     rows = []
     failed = False
 
-    for p in argv[1:]:
+    for p in args.pdfs:
         try:
-            row = parse_pdf(Path(p))
+            row = parse_pdf(Path(p), exchange=args.exchange)
         except Exception as e:
             sys.stderr.write(f"ERROR: failed to parse '{p}': {e}\n")
             failed = True

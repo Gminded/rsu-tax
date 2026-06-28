@@ -24,6 +24,8 @@ from typing import Optional, Dict, List
 from pdfminer.high_level import extract_pages
 from pdfminer.layout import LTTextContainer, LTTextBox, LTTextLine, LAParams
 
+from trading_calendar import first_trading_day_on_or_after, DEFAULT_EXCHANGE
+
 def _collect_boxes(pdf_path: Path):
     laparams = LAParams(line_margin=0.2, char_margin=2.0, word_margin=0.1, boxes_flow=None)
     boxes = []
@@ -86,7 +88,7 @@ def _parse_mmddyyyy(s: str) -> Optional[str]:
             pass
     return None
 
-def parse_pdf(pdf_path: Path) -> Dict[str, Optional[str]]:
+def parse_pdf(pdf_path: Path, exchange: str = DEFAULT_EXCHANGE) -> Dict[str, Optional[str]]:
     boxes = _collect_boxes(pdf_path)
 
     # Release Date block (the cell to the right contains date, shares released, etc.)
@@ -217,8 +219,14 @@ def parse_pdf(pdf_path: Path) -> Dict[str, Optional[str]]:
             "The PDF may use an unexpected layout or the share counts are inconsistent."
         )
 
+    # The PDF date is the nominal vesting date; the vest actually settles on the
+    # first trading day on or after it.  Keep the raw value for audit and use the
+    # corrected trading-day date downstream (FX month, tax year, HS284 matching).
+    corrected_date = first_trading_day_on_or_after(date_out, exchange).isoformat()
+
     return {
-        "Release Date": date_out,
+        "Release Date": corrected_date,
+        "Nominal Release Date": date_out,
         "Granted": int(round(grant)) if grant is not None else None,
         "Sold": withheld if withheld is not None else None,
         "Issued": int(round(issued)) if issued is not None else None,
